@@ -9,6 +9,9 @@ constexpr std::array<DemucsProcessor::Stem, 4> stemOrder {
     DemucsProcessor::Stem::other
 };
 
+constexpr double markerToleranceSeconds = 0.05;
+constexpr double markerNavigationToleranceSeconds = 1.0;
+
 juce::String shellQuote(const juce::String& argument)
 {
     if (argument.isEmpty())
@@ -44,6 +47,19 @@ juce::String formatCommandForShell(const juce::StringArray& command)
         quoted.add(shellQuote(argument));
 
     return quoted.joinIntoString(" ");
+}
+
+juce::Array<juce::File> findDirectChildDirectories(const juce::File& directory)
+{
+    juce::Array<juce::File> children;
+    if (! directory.isDirectory())
+        return children;
+
+    const auto entries = directory.findChildFiles(juce::File::findDirectories, false);
+    for (const auto& entry : entries)
+        children.add(entry);
+
+    return children;
 }
 }
 
@@ -165,8 +181,6 @@ bool DemucsProcessor::setSourceAudioFile(const juce::File& audioFile)
 {
     if (audioFile == juce::File())
         return false;
-
-    const auto cacheKey = buildSourceCacheKey(audioFile);
     juce::String cacheError;
     auto cacheRoot = getCacheRootDirectory();
     if (! cacheRoot.exists())
@@ -179,10 +193,12 @@ bool DemucsProcessor::setSourceAudioFile(const juce::File& audioFile)
     {
         const juce::ScopedLock lock(stateLock);
         sourceAudioFile = audioFile;
-        sourceCacheKey = cacheKey;
+        selectedCacheDirectory = audioFile.getParentDirectory();
+        selectedCacheEntryName = selectedCacheDirectory.getFileName();
         sourceAudioLoaded = true;
         currentPlaybackPositionSeconds = 0.0;
         ++currentGeneration;
+        markers = loadMarkersFromMetadata(selectedCacheDirectory);
         clearSeparatedAudio();
         separationInProgress = false;
         autoResumePending = false;
@@ -234,6 +250,30 @@ float DemucsProcessor::getStemGain(Stem stem) const
     return stemGains[static_cast<size_t>(stem)];
 }
 
+void DemucsProcessor::setStemSolo(Stem stem, bool shouldSolo)
+{
+    const juce::ScopedLock lock(stateLock);
+    stemSoloStates[static_cast<size_t>(stem)] = shouldSolo;
+}
+
+bool DemucsProcessor::isStemSolo(Stem stem) const
+{
+    const juce::ScopedLock lock(stateLock);
+    return stemSoloStates[static_cast<size_t>(stem)];
+}
+
+void DemucsProcessor::setStemMute(Stem stem, bool shouldMute)
+{
+    const juce::ScopedLock lock(stateLock);
+    stemMuteStates[static_cast<size_t>(stem)] = shouldMute;
+}
+
+bool DemucsProcessor::isStemMuted(Stem stem) const
+{
+    const juce::ScopedLock lock(stateLock);
+    return stemMuteStates[static_cast<size_t>(stem)];
+}
+
 void DemucsProcessor::seekTo(double positionSeconds, bool shouldResumeWhenBuffered)
 {
     const juce::ScopedLock lock(stateLock);
@@ -281,6 +321,8 @@ bool DemucsProcessor::renderBufferedAudio(juce::AudioBuffer<float>& output, doub
 
     std::shared_ptr<const SeparatedAudioData> separatedSnapshot;
     std::array<float, static_cast<size_t>(Stem::count)> gainsSnapshot {};
+    std::array<bool, static_cast<size_t>(Stem::count)> soloSnapshot {};
+    std::array<bool, static_cast<size_t>(Stem::count)> muteSnapshot {};
     double outputSampleRate = 0.0;
 
     {
@@ -292,8 +334,12 @@ bool DemucsProcessor::renderBufferedAudio(juce::AudioBuffer<float>& output, doub
 
         separatedSnapshot = separatedAudioData;
         gainsSnapshot = stemGains;
+        soloSnapshot = stemSoloStates;
+        muteSnapshot = stemMuteStates;
         outputSampleRate = currentSampleRate;
     }
+
+    const auto hasAnySolo = std::any_of(soloSnapshot.begin(), soloSnapshot.end(), [] (bool isSolo) { return isSolo; });
 
     const auto outputChannels = output.getNumChannels();
     const auto outputSamples = output.getNumSamples();
@@ -309,6 +355,12 @@ bool DemucsProcessor::renderBufferedAudio(juce::AudioBuffer<float>& output, doub
 
             for (size_t stemIndex = 0; stemIndex < gainsSnapshot.size(); ++stemIndex)
             {
+                if (muteSnapshot[stemIndex])
+                    continue;
+
+                if (hasAnySolo && ! soloSnapshot[stemIndex])
+                    continue;
+
                 const auto& stemBuffer = separatedSnapshot->stems[stemIndex];
                 const auto sourceChannel = juce::jmin(channel, stemBuffer.getNumChannels() - 1);
                 mixedSample += getSampleAt(stemBuffer, sourceChannel, stemSamplePosition) * gainsSnapshot[stemIndex];
@@ -325,6 +377,222 @@ juce::File DemucsProcessor::getSourceAudioFile() const
 {
     const juce::ScopedLock lock(stateLock);
     return sourceAudioFile;
+}
+
+juce::File DemucsProcessor::getSelectedCacheDirectory() const
+{
+    const juce::ScopedLock lock(stateLock);
+    return selectedCacheDirectory;
+}
+
+juce::File DemucsProcessor::getSpectrogramCacheFile() const
+{
+    const juce::ScopedLock lock(stateLock);
+    return getSpectrogramCacheFile(selectedCacheDirectory);
+}
+
+juce::String DemucsProcessor::getSelectedCacheEntryName() const
+{
+    const juce::ScopedLock lock(stateLock);
+    return selectedCacheEntryName;
+}
+
+juce::Array<double> DemucsProcessor::getMarkers() const
+{
+    const juce::ScopedLock lock(stateLock);
+    return markers;
+}
+
+bool DemucsProcessor::hasMarkers() const
+{
+    const juce::ScopedLock lock(stateLock);
+    return ! markers.isEmpty();
+}
+
+bool DemucsProcessor::hasMarkerNearPosition(double positionSeconds) const
+{
+    const juce::ScopedLock lock(stateLock);
+
+    for (const auto markerPosition : markers)
+    {
+        if (std::abs(markerPosition - positionSeconds) <= markerToleranceSeconds)
+            return true;
+    }
+
+    return false;
+}
+
+bool DemucsProcessor::canAddMarkerAt(double positionSeconds, double durationSeconds) const
+{
+    const auto clampedPosition = juce::jlimit(0.0, durationSeconds, positionSeconds);
+    if (durationSeconds <= 0.0
+        || clampedPosition <= markerToleranceSeconds
+        || clampedPosition >= durationSeconds - markerToleranceSeconds)
+    {
+        return false;
+    }
+
+    return ! hasMarkerNearPosition(clampedPosition);
+}
+
+bool DemucsProcessor::addMarker(double positionSeconds, double durationSeconds)
+{
+    juce::Array<double> markersToSave;
+    juce::File sourceDirectory;
+
+    {
+        const juce::ScopedLock lock(stateLock);
+        if (! sourceAudioLoaded || selectedCacheDirectory == juce::File())
+            return false;
+
+        const auto clampedPosition = juce::jlimit(0.0, durationSeconds, positionSeconds);
+        if (durationSeconds <= 0.0
+            || clampedPosition <= markerToleranceSeconds
+            || clampedPosition >= durationSeconds - markerToleranceSeconds)
+        {
+            return false;
+        }
+
+        for (const auto markerPosition : markers)
+        {
+            if (std::abs(markerPosition - clampedPosition) <= markerToleranceSeconds)
+                return false;
+        }
+
+        markers.add(clampedPosition);
+        markers.sort();
+        markersToSave = markers;
+        sourceDirectory = selectedCacheDirectory;
+    }
+
+    return saveMarkersToMetadata(sourceDirectory, markersToSave);
+}
+
+bool DemucsProcessor::removeMarkerNear(double positionSeconds)
+{
+    juce::Array<double> markersToSave;
+    juce::File sourceDirectory;
+    auto removed = false;
+
+    {
+        const juce::ScopedLock lock(stateLock);
+        if (! sourceAudioLoaded || selectedCacheDirectory == juce::File())
+            return false;
+
+        for (int index = 0; index < markers.size(); ++index)
+        {
+            if (std::abs(markers.getReference(index) - positionSeconds) <= markerToleranceSeconds)
+            {
+                markers.remove(index);
+                removed = true;
+                break;
+            }
+        }
+
+        if (! removed)
+            return false;
+
+        markersToSave = markers;
+        sourceDirectory = selectedCacheDirectory;
+    }
+
+    return saveMarkersToMetadata(sourceDirectory, markersToSave);
+}
+
+bool DemucsProcessor::getPreviousMarker(double positionSeconds, double& markerPositionSeconds) const
+{
+    const juce::ScopedLock lock(stateLock);
+
+    for (int index = markers.size(); --index >= 0;)
+    {
+        const auto markerPosition = markers.getReference(index);
+        if (markerPosition < positionSeconds - markerNavigationToleranceSeconds)
+        {
+            markerPositionSeconds = markerPosition;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool DemucsProcessor::getNextMarker(double positionSeconds, double& markerPositionSeconds) const
+{
+    const juce::ScopedLock lock(stateLock);
+
+    for (const auto markerPosition : markers)
+    {
+        if (markerPosition > positionSeconds + markerNavigationToleranceSeconds)
+        {
+            markerPositionSeconds = markerPosition;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+juce::StringArray DemucsProcessor::getCachedSourceEntryNames() const
+{
+    juce::StringArray entries;
+    const auto cacheRoot = getCacheRootDirectory();
+    for (const auto& sourceDirectory : findDirectChildDirectories(cacheRoot))
+    {
+        if (getCachedSourceFile(sourceDirectory).existsAsFile())
+            entries.add(sourceDirectory.getFileName());
+    }
+
+    entries.sort(true);
+    return entries;
+}
+
+bool DemucsProcessor::prepareSourceAudioFile(const juce::File& audioFile,
+                                             juce::File& cachedSourceFile,
+                                             juce::String& errorMessage) const
+{
+    if (! audioFile.existsAsFile())
+    {
+        errorMessage = "The selected audio file does not exist.";
+        return false;
+    }
+
+    auto existingSourceDirectory = findExistingSourceDirectory(audioFile);
+    if (existingSourceDirectory == juce::File())
+    {
+        const auto preferredName = audioFile.getFileName();
+        existingSourceDirectory = getCacheRootDirectory().getChildFile(getUniqueSourceDirectoryName(preferredName));
+    }
+
+    if (! existingSourceDirectory.exists() && ! existingSourceDirectory.createDirectory())
+    {
+        errorMessage = "Unable to create cache directory for the selected file.";
+        return false;
+    }
+
+    if (! writeSourceMetadata(existingSourceDirectory, audioFile))
+    {
+        errorMessage = "Unable to store cache metadata for the selected file.";
+        return false;
+    }
+
+    return ensureCachedSourceFile(audioFile, cachedSourceFile, errorMessage);
+}
+
+bool DemucsProcessor::resolveCachedSourceEntry(const juce::String& entryName,
+                                               juce::File& cachedSourceFile,
+                                               juce::String& errorMessage) const
+{
+    errorMessage.clear();
+    const auto sourceDirectory = getCacheRootDirectory().getChildFile(entryName);
+    cachedSourceFile = getCachedSourceFile(sourceDirectory);
+
+    if (! cachedSourceFile.existsAsFile())
+    {
+        errorMessage = "Cached source file not found for " + entryName;
+        return false;
+    }
+
+    return true;
 }
 
 juce::String DemucsProcessor::getCacheRootPath() const
@@ -344,7 +612,7 @@ void DemucsProcessor::run()
     {
         juce::String modelName;
         juce::File audioFile;
-        juce::String sourceKey;
+        juce::File sourceDirectory;
         int generation = 0;
         bool shouldWait = false;
 
@@ -367,7 +635,7 @@ void DemucsProcessor::run()
             {
                 modelName = loadedModelName;
                 audioFile = sourceAudioFile;
-                sourceKey = sourceCacheKey;
+                sourceDirectory = selectedCacheDirectory;
                 generation = currentGeneration;
                 separationInProgress = true;
                 bufferProgress = 0.0;
@@ -382,7 +650,7 @@ void DemucsProcessor::run()
         }
 
         juce::String errorMessage;
-        const auto stemDirectory = getStemCacheDirectory(modelName, sourceKey);
+        const auto stemDirectory = getStemCacheDirectory(modelName, sourceDirectory);
         std::shared_ptr<SeparatedAudioData> separatedResult;
 
         if (areStemFilesCached(stemDirectory))
@@ -392,8 +660,8 @@ void DemucsProcessor::run()
         else
         {
             juce::File stagedInputFile;
-            if (ensureStagedInputFile(audioFile, sourceKey, stagedInputFile, errorMessage)
-                && runDemucsCli(modelName, stagedInputFile, errorMessage))
+            if (ensureCachedSourceFile(audioFile, stagedInputFile, errorMessage)
+                && runDemucsCli(modelName, stemDirectory, stagedInputFile, errorMessage))
             {
                 separatedResult = loadSeparatedAudioFromCache(stemDirectory, generation, errorMessage);
             }
@@ -548,18 +816,6 @@ juce::String DemucsProcessor::resolveDemucsExecutable() const
     return {};
 }
 
-juce::String DemucsProcessor::buildSourceCacheKey(const juce::File& audioFile) const
-{
-    const auto keyMaterial = audioFile.getFullPathName()
-                           + "|"
-                           + juce::String(audioFile.getSize())
-                           + "|"
-                           + audioFile.getLastModificationTime().toISO8601(true);
-
-    const auto hashValue = static_cast<juce::int64>(keyMaterial.hashCode64());
-    return juce::String::toHexString(hashValue).paddedLeft('0', 16);
-}
-
 juce::File DemucsProcessor::getCacheRootDirectory() const
 {
     return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
@@ -569,18 +825,149 @@ juce::File DemucsProcessor::getCacheRootDirectory() const
         .getChildFile("DemucsCache");
 }
 
-juce::File DemucsProcessor::getStagedInputFile(const juce::File& audioFile, const juce::String& sourceKey) const
+juce::File DemucsProcessor::getSourceMetadataFile(const juce::File& sourceDirectory) const
 {
-    return getCacheRootDirectory()
-        .getChildFile("_inputs")
-        .getChildFile(sourceKey + audioFile.getFileExtension());
+    return sourceDirectory.getChildFile("cache-info.xml");
 }
 
-juce::File DemucsProcessor::getStemCacheDirectory(const juce::String& modelName, const juce::String& sourceKey) const
+juce::File DemucsProcessor::getCachedSourceFile(const juce::File& sourceDirectory) const
 {
-    return getCacheRootDirectory()
-        .getChildFile(modelName)
-        .getChildFile(sourceKey);
+    if (! sourceDirectory.isDirectory())
+        return {};
+
+    const auto files = sourceDirectory.findChildFiles(juce::File::findFiles, false, "source.*");
+    if (files.isEmpty())
+        return {};
+
+    return files.getFirst();
+}
+
+juce::File DemucsProcessor::getSpectrogramCacheFile(const juce::File& sourceDirectory) const
+{
+    if (sourceDirectory == juce::File())
+        return {};
+
+    return sourceDirectory.getChildFile("spectrogram.thumb");
+}
+
+juce::File DemucsProcessor::getStemCacheDirectory(const juce::String& modelName, const juce::File& sourceDirectory) const
+{
+    return sourceDirectory.getChildFile(modelName);
+}
+
+juce::Array<double> DemucsProcessor::loadMarkersFromMetadata(const juce::File& sourceDirectory) const
+{
+    juce::Array<double> loadedMarkers;
+    const auto metadataFile = getSourceMetadataFile(sourceDirectory);
+    if (! metadataFile.existsAsFile())
+        return loadedMarkers;
+
+    auto xml = juce::XmlDocument::parse(metadataFile);
+    if (xml == nullptr || ! xml->hasTagName("JamPTCachedSource"))
+        return loadedMarkers;
+
+    if (auto* markersElement = xml->getChildByName("Markers"))
+    {
+        for (auto* markerElement = markersElement->getFirstChildElement(); markerElement != nullptr; markerElement = markerElement->getNextElement())
+        {
+            if (! markerElement->hasTagName("Marker"))
+                continue;
+
+            const auto positionSeconds = markerElement->getDoubleAttribute("positionSeconds", -1.0);
+            if (positionSeconds > markerToleranceSeconds)
+                loadedMarkers.add(positionSeconds);
+        }
+    }
+
+    loadedMarkers.sort();
+    return loadedMarkers;
+}
+
+bool DemucsProcessor::saveMarkersToMetadata(const juce::File& sourceDirectory, const juce::Array<double>& markersToSave) const
+{
+    const auto metadataFile = getSourceMetadataFile(sourceDirectory);
+    std::unique_ptr<juce::XmlElement> xml;
+
+    if (metadataFile.existsAsFile())
+        xml = juce::XmlDocument::parse(metadataFile);
+
+    if (xml == nullptr || ! xml->hasTagName("JamPTCachedSource"))
+        xml = std::make_unique<juce::XmlElement>("JamPTCachedSource");
+
+    xml->removeChildElement(xml->getChildByName("Markers"), true);
+
+    auto markersElement = std::make_unique<juce::XmlElement>("Markers");
+    for (const auto markerPosition : markersToSave)
+    {
+        auto markerElement = std::make_unique<juce::XmlElement>("Marker");
+        markerElement->setAttribute("positionSeconds", juce::String(markerPosition, 6));
+        markersElement->addChildElement(markerElement.release());
+    }
+
+    xml->addChildElement(markersElement.release());
+    return xml->writeTo(metadataFile);
+}
+
+juce::String DemucsProcessor::getUniqueSourceDirectoryName(const juce::String& preferredName) const
+{
+    auto candidate = preferredName;
+    auto suffix = 2;
+    const auto cacheRoot = getCacheRootDirectory();
+
+    while (cacheRoot.getChildFile(candidate).exists())
+    {
+        candidate = preferredName + " (" + juce::String(suffix) + ")";
+        ++suffix;
+    }
+
+    return candidate;
+}
+
+juce::File DemucsProcessor::findExistingSourceDirectory(const juce::File& audioFile) const
+{
+    const auto cacheRoot = getCacheRootDirectory();
+    for (const auto& sourceDirectory : findDirectChildDirectories(cacheRoot))
+    {
+        if (matchesSourceMetadata(sourceDirectory, audioFile))
+            return sourceDirectory;
+    }
+
+    return {};
+}
+
+bool DemucsProcessor::writeSourceMetadata(const juce::File& sourceDirectory, const juce::File& originalAudioFile) const
+{
+    std::unique_ptr<juce::XmlElement> metadata;
+    const auto metadataFile = getSourceMetadataFile(sourceDirectory);
+
+    if (metadataFile.existsAsFile())
+        metadata = juce::XmlDocument::parse(metadataFile);
+
+    if (metadata == nullptr || ! metadata->hasTagName("JamPTCachedSource"))
+        metadata = std::make_unique<juce::XmlElement>("JamPTCachedSource");
+
+    metadata->setAttribute("originalFileName", originalAudioFile.getFileName());
+    metadata->setAttribute("originalSize", juce::String(originalAudioFile.getSize()));
+    metadata->setAttribute("originalModified",
+                           juce::String(originalAudioFile.getLastModificationTime().toMilliseconds()));
+    metadata->setAttribute("cachedSourceFileName", "source" + originalAudioFile.getFileExtension());
+    metadata->setAttribute("spectrogramFileName", "spectrogram.thumb");
+    return metadata->writeTo(metadataFile);
+}
+
+bool DemucsProcessor::matchesSourceMetadata(const juce::File& sourceDirectory, const juce::File& audioFile) const
+{
+    const auto metadataFile = getSourceMetadataFile(sourceDirectory);
+    if (! metadataFile.existsAsFile())
+        return false;
+
+    auto xml = juce::XmlDocument::parse(metadataFile);
+    if (xml == nullptr || ! xml->hasTagName("JamPTCachedSource"))
+        return false;
+
+    return xml->getStringAttribute("originalFileName") == audioFile.getFileName()
+        && xml->getStringAttribute("originalSize") == juce::String(audioFile.getSize())
+        && xml->getStringAttribute("originalModified") == juce::String(audioFile.getLastModificationTime().toMilliseconds());
 }
 
 bool DemucsProcessor::areStemFilesCached(const juce::File& stemDirectory) const
@@ -594,33 +981,60 @@ bool DemucsProcessor::areStemFilesCached(const juce::File& stemDirectory) const
     return true;
 }
 
-bool DemucsProcessor::ensureStagedInputFile(const juce::File& audioFile,
-                                            const juce::String& sourceKey,
-                                            juce::File& stagedInputFile,
-                                            juce::String& errorMessage) const
+bool DemucsProcessor::ensureCachedSourceFile(const juce::File& audioFile,
+                                             juce::File& cachedSourceFile,
+                                             juce::String& errorMessage) const
 {
-    stagedInputFile = getStagedInputFile(audioFile, sourceKey);
-    const auto parent = stagedInputFile.getParentDirectory();
+    if (! audioFile.existsAsFile())
+    {
+        errorMessage = "The selected audio file does not exist.";
+        return false;
+    }
+
+    auto sourceDirectory = audioFile.getParentDirectory();
+    auto sourceFile = audioFile;
+
+    if (! audioFile.getFileName().startsWith("source."))
+    {
+        sourceDirectory = findExistingSourceDirectory(audioFile);
+        if (sourceDirectory == juce::File())
+            sourceDirectory = getCacheRootDirectory().getChildFile(getUniqueSourceDirectoryName(audioFile.getFileName()));
+
+        sourceFile = sourceDirectory.getChildFile("source" + audioFile.getFileExtension());
+    }
+
+    const auto parent = sourceFile.getParentDirectory();
 
     if (! parent.exists() && ! parent.createDirectory())
     {
-        errorMessage = "Unable to create cache input directory.";
+        errorMessage = "Unable to create source cache directory.";
         return false;
     }
 
-    if (stagedInputFile.existsAsFile())
-        return true;
-
-    if (! audioFile.copyFileTo(stagedInputFile))
+    if (! audioFile.getFileName().startsWith("source.") && ! writeSourceMetadata(parent, audioFile))
     {
-        errorMessage = "Unable to stage source audio for demucs.";
+        errorMessage = "Unable to update source cache metadata.";
         return false;
     }
 
+    if (sourceFile.existsAsFile())
+    {
+        cachedSourceFile = sourceFile;
+        return true;
+    }
+
+    if (! audioFile.copyFileTo(sourceFile))
+    {
+        errorMessage = "Unable to copy the source audio into the cache.";
+        return false;
+    }
+
+    cachedSourceFile = sourceFile;
     return true;
 }
 
 bool DemucsProcessor::runDemucsCli(const juce::String& modelName,
+                                   const juce::File& stemDirectory,
                                    const juce::File& stagedInputFile,
                                    juce::String& errorMessage)
 {
@@ -632,10 +1046,16 @@ bool DemucsProcessor::runDemucsCli(const juce::String& modelName,
         return false;
     }
 
-    const auto cacheRoot = getCacheRootDirectory();
-    if (! cacheRoot.exists() && ! cacheRoot.createDirectory())
+    const auto sourceDirectory = stagedInputFile.getParentDirectory();
+    if (! sourceDirectory.exists() && ! sourceDirectory.createDirectory())
     {
         errorMessage = "Unable to create demucs cache directory.";
+        return false;
+    }
+
+    if (! stemDirectory.exists() && ! stemDirectory.createDirectory())
+    {
+        errorMessage = "Unable to create model cache directory.";
         return false;
     }
 
@@ -643,7 +1063,7 @@ bool DemucsProcessor::runDemucsCli(const juce::String& modelName,
     const juce::StringArray command {
         demucsExecutable,
         "-n", modelName,
-        "-o", cacheRoot.getFullPathName(),
+        "-o", sourceDirectory.getFullPathName(),
         stagedInputFile.getFullPathName()
     };
 
@@ -656,19 +1076,66 @@ bool DemucsProcessor::runDemucsCli(const juce::String& modelName,
     {
         const juce::ScopedLock lock(stateLock);
         activeChildProcess = std::move(process);
-        bufferProgress = 0.1;
+        bufferProgress = 0.02;
         bufferStatusText = "Separating stems with demucs";
         lastProcessLog = "Launching: " + formatCommandForShell(command);
     }
 
     juce::String processOutput;
-    auto updateProcessLog = [this](const juce::String& logText)
+    const auto processStartTimeMs = juce::Time::getMillisecondCounterHiRes();
+    auto parseProgressFromLog = [](const juce::String& logText) -> double
+    {
+        auto bestPercent = -1.0;
+
+        for (int index = 0; index < logText.length(); ++index)
+        {
+            if (logText[index] != '%')
+                continue;
+
+            auto start = index;
+            while (start > 0)
+            {
+                const auto character = logText[start - 1];
+                if (juce::CharacterFunctions::isDigit(character) || character == '.')
+                    --start;
+                else
+                    break;
+            }
+
+            if (start == index)
+                continue;
+
+            const auto percentText = logText.substring(start, index).trim();
+            const auto percentValue = percentText.getDoubleValue();
+            if (percentValue >= 0.0 && percentValue <= 100.0)
+                bestPercent = juce::jmax(bestPercent, percentValue);
+        }
+
+        return bestPercent;
+    };
+
+    auto updateProcessLog = [this, processStartTimeMs](const juce::String& logText, double parsedPercent)
     {
         const juce::ScopedLock lock(stateLock);
         lastProcessLog = logText.length() > 4000 ? logText.fromLastOccurrenceOf("\n", false, false).trim() : logText;
+
+        double newProgress = bufferProgress;
+        if (parsedPercent >= 0.0)
+        {
+            newProgress = juce::jmax(newProgress,
+                                     juce::jmap(parsedPercent, 0.0, 100.0, 0.05, 0.98));
+        }
+        else
+        {
+            const auto elapsedSeconds = (juce::Time::getMillisecondCounterHiRes() - processStartTimeMs) / 1000.0;
+            const auto estimatedProgress = juce::jlimit(0.05, 0.9, 0.05 + (elapsedSeconds / 60.0) * 0.85);
+            newProgress = juce::jmax(newProgress, estimatedProgress);
+        }
+
+        bufferProgress = newProgress;
     };
 
-    auto drainChildOutput = [&processOutput, &updateProcessLog](juce::ChildProcess& child)
+    auto drainChildOutput = [&processOutput, &updateProcessLog, &parseProgressFromLog](juce::ChildProcess& child)
     {
         char buffer[512];
         bool appended = false;
@@ -687,7 +1154,13 @@ bool DemucsProcessor::runDemucsCli(const juce::String& modelName,
         {
             const auto trimmed = processOutput.trim();
             if (trimmed.isNotEmpty())
-                updateProcessLog(trimmed);
+                updateProcessLog(trimmed, parseProgressFromLog(trimmed));
+        }
+        else
+        {
+            const auto trimmed = processOutput.trim();
+            if (trimmed.isNotEmpty())
+                updateProcessLog(trimmed, parseProgressFromLog(trimmed));
         }
     };
 
@@ -722,8 +1195,9 @@ bool DemucsProcessor::runDemucsCli(const juce::String& modelName,
     }
 
     processOutput = processOutput.trim();
-    updateProcessLog(processOutput.isNotEmpty() ? processOutput
-                                                : "Demucs finished without console output.");
+    const auto finalLog = processOutput.isNotEmpty() ? processOutput
+                                                     : "Demucs finished without console output.";
+    updateProcessLog(finalLog, parseProgressFromLog(finalLog));
 
     if (threadShouldExit())
     {
@@ -746,7 +1220,50 @@ bool DemucsProcessor::runDemucsCli(const juce::String& modelName,
         return false;
     }
 
-    return true;
+    return normaliseDemucsStemLayout(stemDirectory,
+                                     stagedInputFile.getFileNameWithoutExtension(),
+                                     errorMessage);
+}
+
+bool DemucsProcessor::normaliseDemucsStemLayout(const juce::File& stemDirectory,
+                                                const juce::String& stagedSourceBaseName,
+                                                juce::String& errorMessage) const
+{
+    errorMessage.clear();
+    const auto nestedStemDirectory = stemDirectory.getChildFile(stagedSourceBaseName);
+
+    if (! nestedStemDirectory.isDirectory())
+        return areStemFilesCached(stemDirectory);
+
+    for (const auto stem : stemOrder)
+    {
+        const auto sourceStemFile = nestedStemDirectory.getChildFile(getStemFileName(stem));
+        const auto targetStemFile = stemDirectory.getChildFile(getStemFileName(stem));
+
+        if (! sourceStemFile.existsAsFile())
+        {
+            errorMessage = "Missing demucs output stem " + sourceStemFile.getFileName();
+            return false;
+        }
+
+        if (targetStemFile.existsAsFile() && ! targetStemFile.deleteFile())
+        {
+            errorMessage = "Unable to replace cached stem " + targetStemFile.getFileName();
+            return false;
+        }
+
+        if (! sourceStemFile.moveFileTo(targetStemFile))
+        {
+            if (! sourceStemFile.copyFileTo(targetStemFile) || ! sourceStemFile.deleteFile())
+            {
+                errorMessage = "Unable to normalise demucs output for " + targetStemFile.getFileName();
+                return false;
+            }
+        }
+    }
+
+    nestedStemDirectory.deleteRecursively();
+    return areStemFilesCached(stemDirectory);
 }
 
 std::shared_ptr<DemucsProcessor::SeparatedAudioData> DemucsProcessor::loadSeparatedAudioFromCache(const juce::File& stemDirectory,

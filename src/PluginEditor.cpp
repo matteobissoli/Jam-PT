@@ -47,9 +47,20 @@ void StemKnobLookAndFeel::drawRotarySlider(juce::Graphics& g,
     g.drawLine(pointerLine, 3.0f);
 }
 
+juce::Font CacheSelectorLookAndFeel::getComboBoxFont(juce::ComboBox&)
+{
+    return { juce::FontOptions(18.0f, juce::Font::bold) };
+}
+
 WaveformScrubber::WaveformScrubber()
 {
     formatManager.registerBasicFormats();
+    thumbnail.addChangeListener(this);
+}
+
+WaveformScrubber::~WaveformScrubber()
+{
+    thumbnail.removeChangeListener(this);
 }
 
 void WaveformScrubber::paint(juce::Graphics& g)
@@ -84,6 +95,55 @@ void WaveformScrubber::paint(juce::Graphics& g)
     g.setColour(juce::Colours::white.withAlpha(0.95f));
     g.drawLine(playheadX, waveformBounds.getY(), playheadX, waveformBounds.getBottom(), 2.0f);
 
+    if (thumbnail.getTotalLength() > 0.0 && ! markers.isEmpty())
+    {
+        g.setColour(juce::Colour::fromRGB(255, 224, 96).withAlpha(0.95f));
+        for (const auto markerPosition : markers)
+        {
+            const auto markerProgress = juce::jlimit(0.0,
+                                                     1.0,
+                                                     markerPosition / thumbnail.getTotalLength());
+            const auto markerX = waveformBounds.getX()
+                               + static_cast<float>(markerProgress) * waveformBounds.getWidth();
+            g.drawLine(markerX, waveformBounds.getY(), markerX, waveformBounds.getBottom(), 1.0f);
+        }
+    }
+
+    if (showSeparationOverlay)
+    {
+        g.setColour(juce::Colours::black.withAlpha(0.55f));
+        g.fillRoundedRectangle(waveformBounds, 8.0f);
+
+        const auto spinnerSize = juce::jmin(waveformBounds.getWidth(), waveformBounds.getHeight()) * 0.28f;
+        if (spinnerSize > 1.0f)
+        {
+            const auto spinnerBounds = juce::Rectangle<float>(spinnerSize, spinnerSize).withCentre(waveformBounds.getCentre());
+            const auto spinnerCentre = spinnerBounds.getCentre();
+            const auto outerRadius = spinnerBounds.getWidth() * 0.5f;
+            const auto innerRadius = outerRadius * 0.46f;
+            const auto nowSeconds = juce::Time::getMillisecondCounterHiRes() / 1000.0;
+            constexpr int spokeCount = 12;
+            const auto leadIndex = static_cast<int>(std::floor(nowSeconds * 12.0)) % spokeCount;
+
+            for (int spokeIndex = 0; spokeIndex < spokeCount; ++spokeIndex)
+            {
+                const auto angle = juce::MathConstants<float>::twoPi
+                                 * (static_cast<float>(spokeIndex) / static_cast<float>(spokeCount))
+                                 - juce::MathConstants<float>::halfPi;
+                const auto distanceFromLead = (spokeIndex - leadIndex + spokeCount) % spokeCount;
+                const auto alpha = juce::jmap(static_cast<float>(distanceFromLead),
+                                              0.0f,
+                                              static_cast<float>(spokeCount - 1),
+                                              0.95f,
+                                              0.12f);
+                const auto innerPoint = spinnerCentre.getPointOnCircumference(innerRadius, angle);
+                const auto outerPoint = spinnerCentre.getPointOnCircumference(outerRadius, angle);
+                g.setColour(juce::Colours::white.withAlpha(alpha));
+                g.drawLine(innerPoint.x, innerPoint.y, outerPoint.x, outerPoint.y, 3.5f);
+            }
+        }
+    }
+
     g.setColour(juce::Colours::white.withAlpha(0.12f));
     g.drawRoundedRectangle(bounds, 8.0f, 1.0f);
 }
@@ -98,8 +158,10 @@ void WaveformScrubber::mouseDrag(const juce::MouseEvent& event)
     handleSeek(event.position.x);
 }
 
-void WaveformScrubber::setAudioFile(const juce::File& file)
+void WaveformScrubber::setAudioFile(const juce::File& file, const juce::File& newSpectrogramCacheFile)
 {
+    spectrogramCacheFile = newSpectrogramCacheFile;
+
     if (! file.existsAsFile())
     {
         clear();
@@ -107,6 +169,17 @@ void WaveformScrubber::setAudioFile(const juce::File& file)
     }
 
     thumbnail.clear();
+
+    if (spectrogramCacheFile.existsAsFile())
+    {
+        juce::FileInputStream inputStream(spectrogramCacheFile);
+        if (inputStream.openedOk() && thumbnail.loadFrom(inputStream))
+        {
+            repaint();
+            return;
+        }
+    }
+
     thumbnail.setSource(new juce::FileInputSource(file));
     repaint();
 }
@@ -114,6 +187,8 @@ void WaveformScrubber::setAudioFile(const juce::File& file)
 void WaveformScrubber::clear()
 {
     thumbnail.clear();
+    spectrogramCacheFile = juce::File();
+    markers.clear();
     playbackProgress = 0.0;
     repaint();
 }
@@ -121,6 +196,19 @@ void WaveformScrubber::clear()
 void WaveformScrubber::setPlaybackProgress(double newProgress)
 {
     playbackProgress = juce::jlimit(0.0, 1.0, newProgress);
+    repaint();
+}
+
+void WaveformScrubber::setSeparationOverlay(double progress, bool shouldShow)
+{
+    separationProgress = juce::jlimit(0.0, 1.0, progress);
+    showSeparationOverlay = shouldShow;
+    repaint();
+}
+
+void WaveformScrubber::setMarkers(const juce::Array<double>& newMarkers)
+{
+    markers = newMarkers;
     repaint();
 }
 
@@ -137,39 +225,106 @@ void WaveformScrubber::handleSeek(float xPosition)
     onSeek(static_cast<double>(normalised) * thumbnail.getTotalLength());
 }
 
+void WaveformScrubber::saveThumbnailCacheIfReady()
+{
+    if (spectrogramCacheFile == juce::File()
+        || thumbnail.getTotalLength() <= 0.0
+        || ! thumbnail.isFullyLoaded())
+        return;
+
+    const auto parentDirectory = spectrogramCacheFile.getParentDirectory();
+    if (! parentDirectory.exists())
+        parentDirectory.createDirectory();
+
+    juce::FileOutputStream outputStream(spectrogramCacheFile);
+    if (! outputStream.openedOk())
+        return;
+
+    thumbnail.saveTo(outputStream);
+}
+
+void WaveformScrubber::changeListenerCallback(juce::ChangeBroadcaster* source)
+{
+    if (source == &thumbnail)
+        saveThumbnailCacheIfReady();
+}
+
 JamPTAudioProcessorEditor::JamPTAudioProcessorEditor(JamPTAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p), valueTreeState(p.getValueTreeState())
 {
-    titleLabel.setText("Jam-PT", juce::dontSendNotification);
-    titleLabel.setJustificationType(juce::Justification::centred);
-    titleLabel.setFont(juce::FontOptions(28.0f, juce::Font::bold));
-    addAndMakeVisible(titleLabel);
+    cachedAudioComboBox.setLookAndFeel(&cacheSelectorLookAndFeel);
+    cachedAudioComboBox.setTextWhenNothingSelected("Select a cached file");
+    cachedAudioComboBox.addListener(this);
+    addAndMakeVisible(cachedAudioComboBox);
 
-    openAudioButton.addListener(this);
-    addAndMakeVisible(openAudioButton);
+    addAudioFileButton.addListener(this);
+    addAudioFileButton.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+    addAudioFileButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::transparentBlack);
+    addAudioFileButton.setColour(juce::TextButton::textColourOffId, juce::Colour::fromRGB(96, 208, 160));
+    addAudioFileButton.setColour(juce::TextButton::textColourOnId, juce::Colour::fromRGB(96, 208, 160));
+    addAndMakeVisible(addAudioFileButton);
+
+    openCacheFolderButton.addListener(this);
+    addAndMakeVisible(openCacheFolderButton);
+    openCacheFolderButton.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(52, 56, 62));
+
+    prevButton.addListener(this);
+    prevButton.setEnabled(false);
+    addAndMakeVisible(prevButton);
+    prevButton.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(52, 56, 62));
 
     playbackButton.addListener(this);
     addAndMakeVisible(playbackButton);
+    playbackButton.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(64, 140, 110));
+    playbackButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+
+    plusButton.addListener(this);
+    plusButton.setEnabled(false);
+    addAndMakeVisible(plusButton);
+    plusButton.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(52, 56, 62));
+
+    auto configureStemStateButton = [this](juce::TextButton& button)
+    {
+        button.addListener(this);
+        button.setClickingTogglesState(false);
+        button.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(52, 56, 62));
+        button.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        addAndMakeVisible(button);
+    };
+
+    configureStemStateButton(vocalsSoloButton);
+    configureStemStateButton(vocalsMuteButton);
+    configureStemStateButton(drumsSoloButton);
+    configureStemStateButton(drumsMuteButton);
+    configureStemStateButton(bassSoloButton);
+    configureStemStateButton(bassMuteButton);
+    configureStemStateButton(otherSoloButton);
+    configureStemStateButton(otherMuteButton);
 
     stopButton.addListener(this);
     addAndMakeVisible(stopButton);
+    stopButton.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(146, 72, 72));
+    stopButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+
+    nextButton.addListener(this);
+    nextButton.setEnabled(false);
+    addAndMakeVisible(nextButton);
+    nextButton.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(52, 56, 62));
 
     openModelButton.setButtonText("Select Demucs model");
     openModelButton.addListener(this);
     addAndMakeVisible(openModelButton);
 
-    audioStatusLabel.setJustificationType(juce::Justification::centredLeft);
     positionLabel.setJustificationType(juce::Justification::centredLeft);
     durationLabel.setJustificationType(juce::Justification::centredRight);
-    bufferStatusLabel.setJustificationType(juce::Justification::centredLeft);
     footerLabel.setJustificationType(juce::Justification::centred);
 
     footerLabel.setText("Offline Demucs CLI separation with cached stems in Application Support", juce::dontSendNotification);
 
-    configureStemKnob(vocalsSlider, "Vocals", DemucsProcessor::Stem::vocals);
     configureStemKnob(drumsSlider, "Drums", DemucsProcessor::Stem::drums);
     configureStemKnob(bassSlider, "Bass", DemucsProcessor::Stem::bass);
     configureStemKnob(otherSlider, "Other", DemucsProcessor::Stem::other);
+    configureStemKnob(vocalsSlider, "Vocals", DemucsProcessor::Stem::vocals);
 
     vocalsAttachment = std::make_unique<SliderAttachment>(valueTreeState,
                                                           JamPTAudioProcessor::getStemParameterId(DemucsProcessor::Stem::vocals),
@@ -184,11 +339,8 @@ JamPTAudioProcessorEditor::JamPTAudioProcessorEditor(JamPTAudioProcessor& p)
                                                          JamPTAudioProcessor::getStemParameterId(DemucsProcessor::Stem::other),
                                                          otherSlider);
 
-    addAndMakeVisible(audioStatusLabel);
     addAndMakeVisible(positionLabel);
     addAndMakeVisible(durationLabel);
-    addAndMakeVisible(bufferStatusLabel);
-    addAndMakeVisible(modelBufferProgressBar);
     addAndMakeVisible(vocalsLabel);
     addAndMakeVisible(drumsLabel);
     addAndMakeVisible(bassLabel);
@@ -207,11 +359,11 @@ JamPTAudioProcessorEditor::JamPTAudioProcessorEditor(JamPTAudioProcessor& p)
     };
 
     if (const auto loadedAudioFile = audioProcessor.getLoadedAudioFile(); loadedAudioFile.existsAsFile())
-        waveformScrubber.setAudioFile(loadedAudioFile);
+        waveformScrubber.setAudioFile(loadedAudioFile, audioProcessor.getSpectrogramCacheFile());
 
     startTimerHz(10);
     refreshLabels();
-    setSize(620, 470);
+    setSize(700, 500);
 }
 
 JamPTAudioProcessorEditor::~JamPTAudioProcessorEditor()
@@ -228,10 +380,24 @@ JamPTAudioProcessorEditor::~JamPTAudioProcessorEditor()
     drumsSlider.setLookAndFeel(nullptr);
     bassSlider.setLookAndFeel(nullptr);
     otherSlider.setLookAndFeel(nullptr);
+    cachedAudioComboBox.setLookAndFeel(nullptr);
 
-    openAudioButton.removeListener(this);
+    cachedAudioComboBox.removeListener(this);
+    addAudioFileButton.removeListener(this);
+    openCacheFolderButton.removeListener(this);
+    prevButton.removeListener(this);
     playbackButton.removeListener(this);
+    plusButton.removeListener(this);
+    vocalsSoloButton.removeListener(this);
+    vocalsMuteButton.removeListener(this);
+    drumsSoloButton.removeListener(this);
+    drumsMuteButton.removeListener(this);
+    bassSoloButton.removeListener(this);
+    bassMuteButton.removeListener(this);
+    otherSoloButton.removeListener(this);
+    otherMuteButton.removeListener(this);
     stopButton.removeListener(this);
+    nextButton.removeListener(this);
     openModelButton.removeListener(this);
 }
 
@@ -245,18 +411,26 @@ void JamPTAudioProcessorEditor::paint(juce::Graphics& g)
 
     g.setColour(juce::Colours::white.withAlpha(0.9f));
     g.drawRoundedRectangle(bounds.toFloat(), 12.0f, 1.0f);
+
+    if (dividerY > 0)
+    {
+        const auto left = static_cast<float>(bounds.getX() + 8);
+        const auto right = static_cast<float>(bounds.getRight() - 8);
+        g.setColour(juce::Colours::white.withAlpha(0.18f));
+        g.drawLine(left, static_cast<float>(dividerY), right, static_cast<float>(dividerY), 1.0f);
+    }
 }
 
 void JamPTAudioProcessorEditor::resized()
 {
     auto area = getLocalBounds().reduced(28);
-    titleLabel.setBounds(area.removeFromTop(36));
-    area.removeFromTop(14);
 
-    auto row1 = area.removeFromTop(30);
-    openAudioButton.setBounds(row1.removeFromLeft(180));
-    row1.removeFromLeft(12);
-    audioStatusLabel.setBounds(row1);
+    auto row1 = area.removeFromTop(34);
+    openCacheFolderButton.setBounds(row1.removeFromRight(128));
+    row1.removeFromRight(8);
+    addAudioFileButton.setBounds(row1.removeFromRight(36));
+    row1.removeFromRight(10);
+    cachedAudioComboBox.setBounds(row1);
 
     area.removeFromTop(12);
     auto row2 = area.removeFromTop(30);
@@ -264,21 +438,17 @@ void JamPTAudioProcessorEditor::resized()
     row2.removeFromLeft(12);
     stopButton.setBounds(row2.removeFromLeft(120));
 
-    area.removeFromTop(12);
+    area.removeFromTop(2);
+    waveformScrubber.setBounds(area.removeFromTop(70));
+
+    area.removeFromTop(10);
     auto row3 = area.removeFromTop(22);
-    positionLabel.setBounds(row3.removeFromLeft(72));
-    durationLabel.setBounds(row3.removeFromRight(72));
+    positionLabel.setBounds(row3.removeFromLeft(140));
+    durationLabel.setBounds(row3.removeFromRight(140));
 
-    area.removeFromTop(8);
-    waveformScrubber.setBounds(area.removeFromTop(56));
-
-    area.removeFromTop(12);
-    bufferStatusLabel.setBounds(area.removeFromTop(22));
-
-    area.removeFromTop(6);
-    modelBufferProgressBar.setBounds(area.removeFromTop(18));
-
-    area.removeFromTop(16);
+    area.removeFromTop(14);
+    dividerY = area.getY() + 6;
+    area.removeFromTop(10);
     auto knobsArea = area.removeFromTop(160);
     auto knobRow = knobsArea;
     auto knob1 = knobRow.removeFromLeft(knobRow.getWidth() / 4).reduced(8, 0);
@@ -286,37 +456,140 @@ void JamPTAudioProcessorEditor::resized()
     auto knob3 = knobRow.removeFromLeft(knobRow.getWidth() / 2).reduced(8, 0);
     auto knob4 = knobRow.reduced(8, 0);
 
-    auto placeKnob = [](juce::Rectangle<int> bounds, juce::Label& label, juce::Slider& knob)
+    auto placeKnob = [](juce::Rectangle<int> bounds,
+                        juce::Label& label,
+                        juce::Slider& knob,
+                        juce::TextButton& soloButton,
+                        juce::TextButton& muteButton)
     {
         label.setBounds(bounds.removeFromTop(22));
-        const auto knobSide = juce::jmin(bounds.getWidth(), bounds.getHeight() - 24);
+        auto buttonColumn = bounds.removeFromRight(24);
+        const auto buttonHeight = 18;
+        const auto buttonGap = 6;
+        const auto totalButtonsHeight = (buttonHeight * 2) + buttonGap;
+        auto buttonArea = buttonColumn.withSizeKeepingCentre(buttonColumn.getWidth(), totalButtonsHeight);
+        soloButton.setBounds(buttonArea.removeFromTop(buttonHeight));
+        buttonArea.removeFromTop(buttonGap);
+        muteButton.setBounds(buttonArea.removeFromTop(buttonHeight));
+
+        bounds.removeFromRight(8);
+        const auto knobSide = juce::jmin(bounds.getWidth(), bounds.getHeight() - 4);
         auto knobBounds = bounds.removeFromTop(juce::jmax(0, knobSide + 24));
         knobBounds = knobBounds.withSizeKeepingCentre(knobSide, knobSide + 24);
         knob.setBounds(knobBounds);
     };
 
-    placeKnob(knob1, vocalsLabel, vocalsSlider);
-    placeKnob(knob2, drumsLabel, drumsSlider);
-    placeKnob(knob3, bassLabel, bassSlider);
-    placeKnob(knob4, otherLabel, otherSlider);
+    placeKnob(knob1, drumsLabel, drumsSlider, drumsSoloButton, drumsMuteButton);
+    placeKnob(knob2, bassLabel, bassSlider, bassSoloButton, bassMuteButton);
+    placeKnob(knob3, otherLabel, otherSlider, otherSoloButton, otherMuteButton);
+    placeKnob(knob4, vocalsLabel, vocalsSlider, vocalsSoloButton, vocalsMuteButton);
 
-    area.removeFromTop(12);
+    area.removeFromTop(28);
+    auto controlsRow = area.removeFromTop(44);
+    const auto gap = 8;
+    const auto totalGapWidth = gap * 4;
+    const auto availableWidth = controlsRow.getWidth() - totalGapWidth;
+    const auto squareButtonWidth = controlsRow.getHeight();
+    const auto mainButtonWidth = juce::jmax(116, (availableWidth - (squareButtonWidth * 2) - 72) / 2);
+    const auto plusButtonWidth = availableWidth - (squareButtonWidth * 2) - (mainButtonWidth * 2);
+
+    prevButton.setBounds(controlsRow.removeFromLeft(squareButtonWidth));
+    controlsRow.removeFromLeft(gap);
+    playbackButton.setBounds(controlsRow.removeFromLeft(mainButtonWidth));
+    controlsRow.removeFromLeft(gap);
+    plusButton.setBounds(controlsRow.removeFromLeft(plusButtonWidth));
+    controlsRow.removeFromLeft(gap);
+    stopButton.setBounds(controlsRow.removeFromLeft(mainButtonWidth));
+    controlsRow.removeFromLeft(gap);
+    nextButton.setBounds(controlsRow.removeFromLeft(squareButtonWidth));
+
+    area.removeFromTop(14);
     auto row4 = area.removeFromTop(30);
-    openModelButton.setBounds(row4.removeFromLeft(180));
+    openModelButton.setBounds(row4.removeFromLeft(210));
     row4.removeFromLeft(12);
     footerLabel.setBounds(row4);
 }
 
 void JamPTAudioProcessorEditor::buttonClicked(juce::Button* button)
 {
-    if (button == &openAudioButton)
+    if (button == &addAudioFileButton)
+    {
         launchAudioFileChooser();
+    }
+    else if (button == &openCacheFolderButton)
+    {
+        const auto selectedCacheDirectory = audioProcessor.getSelectedCacheDirectory();
+        if (selectedCacheDirectory.isDirectory())
+            selectedCacheDirectory.revealToUser();
+    }
+    else if (button == &prevButton || button == &plusButton || button == &nextButton)
+    {
+        if (button == &prevButton)
+            audioProcessor.jumpToPreviousMarker();
+        else if (button == &nextButton)
+            audioProcessor.jumpToNextMarker();
+        else if (audioProcessor.isAtMarker())
+            audioProcessor.removeMarkerAtCurrentPosition();
+        else
+            audioProcessor.addMarkerAtCurrentPosition();
+
+        refreshLabels();
+    }
+    else if (button == &vocalsSoloButton || button == &vocalsMuteButton
+          || button == &drumsSoloButton || button == &drumsMuteButton
+          || button == &bassSoloButton || button == &bassMuteButton
+          || button == &otherSoloButton || button == &otherMuteButton)
+    {
+        auto applyStemStateToggle = [this, button](DemucsProcessor::Stem stem, juce::TextButton& soloButton, juce::TextButton& muteButton)
+        {
+            if (button == &soloButton)
+                audioProcessor.setStemSolo(stem, ! audioProcessor.isStemSolo(stem));
+            else if (button == &muteButton)
+                audioProcessor.setStemMute(stem, ! audioProcessor.isStemMuted(stem));
+        };
+
+        applyStemStateToggle(DemucsProcessor::Stem::vocals, vocalsSoloButton, vocalsMuteButton);
+        applyStemStateToggle(DemucsProcessor::Stem::drums, drumsSoloButton, drumsMuteButton);
+        applyStemStateToggle(DemucsProcessor::Stem::bass, bassSoloButton, bassMuteButton);
+        applyStemStateToggle(DemucsProcessor::Stem::other, otherSoloButton, otherMuteButton);
+        refreshLabels();
+    }
     else if (button == &playbackButton)
+    {
         handlePlaybackButton();
+    }
     else if (button == &stopButton)
+    {
         handleStopButton();
+    }
     else if (button == &openModelButton)
+    {
         launchModelFileChooser();
+    }
+}
+
+void JamPTAudioProcessorEditor::comboBoxChanged(juce::ComboBox* comboBoxThatHasChanged)
+{
+    if (comboBoxThatHasChanged != &cachedAudioComboBox || suppressCacheSelectionCallback)
+        return;
+
+    const auto selectedEntryName = cachedAudioComboBox.getText();
+    if (selectedEntryName.isEmpty())
+        return;
+
+    if (! audioProcessor.loadCachedSourceEntry(selectedEntryName))
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                               "Jam-PT",
+                                               "Unable to load the selected cached audio file.");
+    }
+    else
+    {
+        waveformScrubber.setAudioFile(audioProcessor.getLoadedAudioFile(),
+                                      audioProcessor.getSpectrogramCacheFile());
+    }
+
+    refreshLabels();
 }
 
 void JamPTAudioProcessorEditor::timerCallback()
@@ -327,6 +600,7 @@ void JamPTAudioProcessorEditor::timerCallback()
 void JamPTAudioProcessorEditor::refreshLabels()
 {
     audioProcessor.refreshBackendStateFromLoadedFile();
+    refreshCachedAudioSelector();
 
     const auto audioFile = audioProcessor.getLoadedAudioFileName();
     const auto modelName = audioProcessor.getLoadedModelName();
@@ -344,25 +618,38 @@ void JamPTAudioProcessorEditor::refreshLabels()
             break;
     }
 
-    audioStatusLabel.setText(audioFile.isNotEmpty() ? "Audio: " + audioFile + " (" + playbackStatus + ")" : "Audio: no file loaded",
-                             juce::dontSendNotification);
+    juce::ignoreUnused(playbackStatus);
     openModelButton.setButtonText("Model: " + (modelName.isNotEmpty() ? modelName : "select"));
     playbackButton.setButtonText(audioProcessor.getPlaybackState() == AudioFilePlayer::PlaybackState::playing ? "PAUSE" : "PLAY");
 
     const auto hasAudioFile = audioFile.isNotEmpty();
     const auto stemsReady = audioProcessor.isStemSeparationReady();
     const auto transportEnabled = hasAudioFile && stemsReady;
+    const auto hasMarkers = stemsReady && audioProcessor.hasMarkers();
+    const auto isAtMarker = stemsReady && audioProcessor.isAtMarker();
+    const auto canAddMarker = stemsReady && audioProcessor.canAddMarker();
     playbackButton.setEnabled(transportEnabled);
     stopButton.setEnabled(transportEnabled);
+    prevButton.setEnabled(hasMarkers);
+    nextButton.setEnabled(hasMarkers);
+    plusButton.setEnabled(isAtMarker || canAddMarker);
+    plusButton.setButtonText(isAtMarker ? "-" : "+");
+    openCacheFolderButton.setEnabled(audioProcessor.getSelectedCacheDirectory().isDirectory());
     waveformScrubber.setPlaybackProgress(audioProcessor.getPlaybackProgress());
-    positionLabel.setText(formatTime(audioProcessor.getPlaybackPositionSeconds()), juce::dontSendNotification);
-    durationLabel.setText(formatTime(audioProcessor.getPlaybackDurationSeconds()), juce::dontSendNotification);
-    waveformScrubber.setEnabled(hasAudioFile && stemsReady);
-    modelBufferProgressValue = audioProcessor.getModelBufferProgress();
+    waveformScrubber.setMarkers(audioProcessor.getMarkers());
     const auto separationStatus = audioProcessor.getModelBufferStatusText();
     const auto hasFailure = separationStatus.startsWithIgnoreCase("Failed:");
     const auto summaryStatus = hasFailure ? "Separation failed" : separationStatus;
-    bufferStatusLabel.setText("Separation: " + summaryStatus, juce::dontSendNotification);
+    const auto progress = audioProcessor.getModelBufferProgress();
+    const auto showOverlay = progress > 0.0 && progress < 1.0;
+    waveformScrubber.setSeparationOverlay(progress, showOverlay);
+
+    positionLabel.setText(stemsReady ? formatTime(audioProcessor.getPlaybackPositionSeconds())
+                                     : summaryStatus,
+                          juce::dontSendNotification);
+    durationLabel.setText(hasAudioFile ? formatTime(audioProcessor.getPlaybackDurationSeconds()) : "--:--",
+                          juce::dontSendNotification);
+    waveformScrubber.setEnabled(hasAudioFile && stemsReady);
     vocalsSlider.setEnabled(stemsReady);
     drumsSlider.setEnabled(stemsReady);
     bassSlider.setEnabled(stemsReady);
@@ -377,6 +664,67 @@ void JamPTAudioProcessorEditor::refreshLabels()
     drumsSlider.setAlpha(enabledAlpha);
     bassSlider.setAlpha(enabledAlpha);
     otherSlider.setAlpha(enabledAlpha);
+    auto updateStemStateButton = [enabledAlpha, stemsReady](juce::TextButton& button, bool active, juce::Colour activeColour)
+    {
+        button.setEnabled(stemsReady);
+        button.setAlpha(enabledAlpha);
+        button.setColour(juce::TextButton::buttonColourId, active ? activeColour : juce::Colour::fromRGB(52, 56, 62));
+        button.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    };
+
+    updateStemStateButton(vocalsSoloButton, audioProcessor.isStemSolo(DemucsProcessor::Stem::vocals), juce::Colour::fromRGB(220, 190, 64));
+    updateStemStateButton(vocalsMuteButton, audioProcessor.isStemMuted(DemucsProcessor::Stem::vocals), juce::Colour::fromRGB(72, 110, 220));
+    updateStemStateButton(drumsSoloButton, audioProcessor.isStemSolo(DemucsProcessor::Stem::drums), juce::Colour::fromRGB(220, 190, 64));
+    updateStemStateButton(drumsMuteButton, audioProcessor.isStemMuted(DemucsProcessor::Stem::drums), juce::Colour::fromRGB(72, 110, 220));
+    updateStemStateButton(bassSoloButton, audioProcessor.isStemSolo(DemucsProcessor::Stem::bass), juce::Colour::fromRGB(220, 190, 64));
+    updateStemStateButton(bassMuteButton, audioProcessor.isStemMuted(DemucsProcessor::Stem::bass), juce::Colour::fromRGB(72, 110, 220));
+    updateStemStateButton(otherSoloButton, audioProcessor.isStemSolo(DemucsProcessor::Stem::other), juce::Colour::fromRGB(220, 190, 64));
+    updateStemStateButton(otherMuteButton, audioProcessor.isStemMuted(DemucsProcessor::Stem::other), juce::Colour::fromRGB(72, 110, 220));
+}
+
+void JamPTAudioProcessorEditor::refreshCachedAudioSelector()
+{
+    auto cacheEntries = audioProcessor.getCachedSourceEntryNames();
+    cacheEntries.sort(true);
+
+    const auto selectedEntryName = audioProcessor.getSelectedCacheEntryName();
+    const auto needsRefresh = cacheEntries != lastCacheEntries
+                           || cachedAudioComboBox.getText() != selectedEntryName;
+
+    if (! needsRefresh)
+        return;
+
+    suppressCacheSelectionCallback = true;
+    cachedAudioComboBox.clear(juce::dontSendNotification);
+
+    if (cacheEntries.isEmpty())
+    {
+        cachedAudioComboBox.setTextWhenNothingSelected("No cached files");
+        cachedAudioComboBox.setSelectedId(0, juce::dontSendNotification);
+        cachedAudioComboBox.setText({}, juce::dontSendNotification);
+    }
+    else
+    {
+        cachedAudioComboBox.setTextWhenNothingSelected("Select a cached file");
+        auto itemId = 1;
+        for (const auto& entryName : cacheEntries)
+        {
+            cachedAudioComboBox.addItem(entryName, itemId);
+
+            if (entryName == selectedEntryName)
+                cachedAudioComboBox.setSelectedId(itemId, juce::dontSendNotification);
+
+            ++itemId;
+        }
+
+        if (selectedEntryName.isEmpty())
+            cachedAudioComboBox.setTextWhenNothingSelected("Select a cached file");
+        else if (! cacheEntries.contains(selectedEntryName))
+            cachedAudioComboBox.setText(selectedEntryName, juce::dontSendNotification);
+    }
+
+    lastCacheEntries = cacheEntries;
+    suppressCacheSelectionCallback = false;
 }
 
 void JamPTAudioProcessorEditor::handlePlaybackButton()
@@ -456,7 +804,10 @@ void JamPTAudioProcessorEditor::launchAudioFileChooser()
         safeThis->activeFileChooser.reset();
 
         if (result == juce::File())
+        {
+            safeThis->refreshLabels();
             return;
+        }
 
         if (! safeThis->audioProcessor.loadAudioFile(result))
         {
@@ -467,7 +818,8 @@ void JamPTAudioProcessorEditor::launchAudioFileChooser()
         }
         else
         {
-            safeThis->waveformScrubber.setAudioFile(result);
+            safeThis->waveformScrubber.setAudioFile(safeThis->audioProcessor.getLoadedAudioFile(),
+                                                    safeThis->audioProcessor.getSpectrogramCacheFile());
         }
 
         safeThis->refreshLabels();

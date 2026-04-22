@@ -55,6 +55,7 @@ void JamPTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
     juce::ScopedNoDenormals noDenormals;
     syncStemGainsFromParameters();
     refreshBackendStateFromLoadedFile();
+    processMarkerActionParameters();
 
     buffer.clear();
 
@@ -94,8 +95,17 @@ void JamPTAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     juce::ValueTree state("JamPTState");
     state.appendChild(valueTreeState.copyState(), nullptr);
     state.setProperty("audioFilePath", getLoadedAudioFile().getFullPathName(), nullptr);
+    state.setProperty("cachedSourceEntryName", getSelectedCacheEntryName(), nullptr);
     state.setProperty("audioPositionSeconds", getPlaybackPositionSeconds(), nullptr);
     state.setProperty("modelName", getLoadedModelName(), nullptr);
+    state.setProperty("vocalsSolo", isStemSolo(DemucsProcessor::Stem::vocals), nullptr);
+    state.setProperty("drumsSolo", isStemSolo(DemucsProcessor::Stem::drums), nullptr);
+    state.setProperty("bassSolo", isStemSolo(DemucsProcessor::Stem::bass), nullptr);
+    state.setProperty("otherSolo", isStemSolo(DemucsProcessor::Stem::other), nullptr);
+    state.setProperty("vocalsMute", isStemMuted(DemucsProcessor::Stem::vocals), nullptr);
+    state.setProperty("drumsMute", isStemMuted(DemucsProcessor::Stem::drums), nullptr);
+    state.setProperty("bassMute", isStemMuted(DemucsProcessor::Stem::bass), nullptr);
+    state.setProperty("otherMute", isStemMuted(DemucsProcessor::Stem::other), nullptr);
 
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
     copyXmlToBinary(*xml, destData);
@@ -114,7 +124,19 @@ void JamPTAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
     pendingPlaybackRestore = {};
 
     const auto audioFilePath = state.getProperty("audioFilePath").toString();
-    if (audioFilePath.isNotEmpty())
+    const auto cachedSourceEntryName = state.getProperty("cachedSourceEntryName").toString();
+    if (cachedSourceEntryName.isNotEmpty())
+    {
+        const auto cachedEntries = getCachedSourceEntryNames();
+        if (cachedEntries.contains(cachedSourceEntryName))
+        {
+            pendingPlaybackRestore.cachedSourceEntryName = cachedSourceEntryName;
+            pendingPlaybackRestore.positionSeconds = static_cast<double>(state.getProperty("audioPositionSeconds", 0.0));
+            pendingPlaybackRestore.playbackState = AudioFilePlayer::PlaybackState::stopped;
+            pendingPlaybackRestore.isValid = true;
+        }
+    }
+    else if (audioFilePath.isNotEmpty())
     {
         pendingPlaybackRestore.audioFile = juce::File(audioFilePath);
         pendingPlaybackRestore.positionSeconds = static_cast<double>(state.getProperty("audioPositionSeconds", 0.0));
@@ -133,14 +155,27 @@ void JamPTAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
         valueTreeState.replaceState(parameterState);
 
     syncStemGainsFromParameters();
+    setStemSolo(DemucsProcessor::Stem::vocals, static_cast<bool>(state.getProperty("vocalsSolo", false)));
+    setStemSolo(DemucsProcessor::Stem::drums, static_cast<bool>(state.getProperty("drumsSolo", false)));
+    setStemSolo(DemucsProcessor::Stem::bass, static_cast<bool>(state.getProperty("bassSolo", false)));
+    setStemSolo(DemucsProcessor::Stem::other, static_cast<bool>(state.getProperty("otherSolo", false)));
+    setStemMute(DemucsProcessor::Stem::vocals, static_cast<bool>(state.getProperty("vocalsMute", false)));
+    setStemMute(DemucsProcessor::Stem::drums, static_cast<bool>(state.getProperty("drumsMute", false)));
+    setStemMute(DemucsProcessor::Stem::bass, static_cast<bool>(state.getProperty("bassMute", false)));
+    setStemMute(DemucsProcessor::Stem::other, static_cast<bool>(state.getProperty("otherMute", false)));
 
     applyPendingPlaybackRestore();
 }
 
 bool JamPTAudioProcessor::loadAudioFile(const juce::File& file)
 {
+    juce::String errorMessage;
+    juce::File cachedSourceFile;
+    if (! demucsProcessor.prepareSourceAudioFile(file, cachedSourceFile, errorMessage))
+        return false;
+
     player.stop();
-    const auto loadedAudio = player.loadFile(file);
+    const auto loadedAudio = player.loadFile(cachedSourceFile);
     if (! loadedAudio)
         return false;
 
@@ -149,6 +184,21 @@ bool JamPTAudioProcessor::loadAudioFile(const juce::File& file)
         return false;
 
     return true;
+}
+
+bool JamPTAudioProcessor::loadCachedSourceEntry(const juce::String& entryName)
+{
+    juce::String errorMessage;
+    juce::File cachedSourceFile;
+    if (! demucsProcessor.resolveCachedSourceEntry(entryName, cachedSourceFile, errorMessage))
+        return false;
+
+    player.stop();
+    const auto loadedAudio = player.loadFile(cachedSourceFile);
+    if (! loadedAudio)
+        return false;
+
+    return demucsProcessor.setSourceAudioFile(player.getLoadedFile());
 }
 
 bool JamPTAudioProcessor::startPlayback()
@@ -215,6 +265,91 @@ float JamPTAudioProcessor::getStemGain(DemucsProcessor::Stem stem) const
     return demucsProcessor.getStemGain(stem);
 }
 
+void JamPTAudioProcessor::setStemSolo(DemucsProcessor::Stem stem, bool shouldSolo)
+{
+    demucsProcessor.setStemSolo(stem, shouldSolo);
+}
+
+bool JamPTAudioProcessor::isStemSolo(DemucsProcessor::Stem stem) const
+{
+    return demucsProcessor.isStemSolo(stem);
+}
+
+void JamPTAudioProcessor::setStemMute(DemucsProcessor::Stem stem, bool shouldMute)
+{
+    demucsProcessor.setStemMute(stem, shouldMute);
+}
+
+bool JamPTAudioProcessor::isStemMuted(DemucsProcessor::Stem stem) const
+{
+    return demucsProcessor.isStemMuted(stem);
+}
+
+juce::Array<double> JamPTAudioProcessor::getMarkers() const
+{
+    return demucsProcessor.getMarkers();
+}
+
+bool JamPTAudioProcessor::hasMarkers() const
+{
+    return demucsProcessor.hasMarkers();
+}
+
+bool JamPTAudioProcessor::isAtMarker() const
+{
+    return demucsProcessor.hasMarkerNearPosition(getPlaybackPositionSeconds());
+}
+
+bool JamPTAudioProcessor::canAddMarker() const
+{
+    if (! isStemSeparationReady())
+        return false;
+
+    return demucsProcessor.canAddMarkerAt(getPlaybackPositionSeconds(), getPlaybackDurationSeconds());
+}
+
+bool JamPTAudioProcessor::addMarkerAtCurrentPosition()
+{
+    if (! isStemSeparationReady())
+        return false;
+
+    return demucsProcessor.addMarker(getPlaybackPositionSeconds(), getPlaybackDurationSeconds());
+}
+
+bool JamPTAudioProcessor::removeMarkerAtCurrentPosition()
+{
+    if (! isStemSeparationReady())
+        return false;
+
+    return demucsProcessor.removeMarkerNear(getPlaybackPositionSeconds());
+}
+
+bool JamPTAudioProcessor::jumpToPreviousMarker()
+{
+    if (! isStemSeparationReady())
+        return false;
+
+    double markerPositionSeconds = 0.0;
+    if (! demucsProcessor.getPreviousMarker(getPlaybackPositionSeconds(), markerPositionSeconds))
+        return false;
+
+    setPlaybackPositionSeconds(markerPositionSeconds);
+    return true;
+}
+
+bool JamPTAudioProcessor::jumpToNextMarker()
+{
+    if (! isStemSeparationReady())
+        return false;
+
+    double markerPositionSeconds = 0.0;
+    if (! demucsProcessor.getNextMarker(getPlaybackPositionSeconds(), markerPositionSeconds))
+        return false;
+
+    setPlaybackPositionSeconds(markerPositionSeconds);
+    return true;
+}
+
 double JamPTAudioProcessor::getModelBufferProgress() const
 {
     return demucsProcessor.getBufferProgress();
@@ -243,6 +378,26 @@ juce::File JamPTAudioProcessor::getLoadedAudioFile() const
 juce::String JamPTAudioProcessor::getLoadedAudioFileName() const
 {
     return player.getLoadedFileName();
+}
+
+juce::StringArray JamPTAudioProcessor::getCachedSourceEntryNames() const
+{
+    return demucsProcessor.getCachedSourceEntryNames();
+}
+
+juce::String JamPTAudioProcessor::getSelectedCacheEntryName() const
+{
+    return demucsProcessor.getSelectedCacheEntryName();
+}
+
+juce::File JamPTAudioProcessor::getSelectedCacheDirectory() const
+{
+    return demucsProcessor.getSelectedCacheDirectory();
+}
+
+juce::File JamPTAudioProcessor::getSpectrogramCacheFile() const
+{
+    return demucsProcessor.getSpectrogramCacheFile();
 }
 
 AudioFilePlayer::PlaybackState JamPTAudioProcessor::getPlaybackState() const
@@ -339,6 +494,15 @@ JamPTAudioProcessor::APVTS::ParameterLayout JamPTAudioProcessor::createParameter
     addStemParameter(getStemParameterId(DemucsProcessor::Stem::drums), "Drums");
     addStemParameter(getStemParameterId(DemucsProcessor::Stem::bass), "Bass");
     addStemParameter(getStemParameterId(DemucsProcessor::Stem::other), "Other");
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getMarkerActionParameterId("prev"), 1),
+                                                          "Previous Marker",
+                                                          false));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getMarkerActionParameterId("toggle"), 1),
+                                                          "Toggle Marker",
+                                                          false));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getMarkerActionParameterId("next"), 1),
+                                                          "Next Marker",
+                                                          false));
     return layout;
 }
 
@@ -357,12 +521,51 @@ juce::String JamPTAudioProcessor::getStemParameterId(DemucsProcessor::Stem stem)
     return {};
 }
 
+juce::String JamPTAudioProcessor::getMarkerActionParameterId(const juce::String& actionName)
+{
+    return "marker_" + actionName;
+}
+
 void JamPTAudioProcessor::syncStemGainsFromParameters()
 {
     applyStemGainFromParameter(DemucsProcessor::Stem::vocals);
     applyStemGainFromParameter(DemucsProcessor::Stem::drums);
     applyStemGainFromParameter(DemucsProcessor::Stem::bass);
     applyStemGainFromParameter(DemucsProcessor::Stem::other);
+}
+
+void JamPTAudioProcessor::processMarkerActionParameters()
+{
+    auto handleMarkerAction = [this](const juce::String& parameterId,
+                                     bool& previousPressedState,
+                                     const std::function<void()>& action)
+    {
+        auto* rawValue = valueTreeState.getRawParameterValue(parameterId);
+        if (rawValue == nullptr)
+            return;
+
+        const auto isPressed = rawValue->load() >= 0.5f;
+        if (isPressed && ! previousPressedState)
+            action();
+
+        previousPressedState = isPressed;
+    };
+
+    handleMarkerAction(getMarkerActionParameterId("prev"),
+                       previousMarkerActionPressed,
+                       [this]() { jumpToPreviousMarker(); });
+    handleMarkerAction(getMarkerActionParameterId("toggle"),
+                       toggleMarkerActionPressed,
+                       [this]()
+                       {
+                           if (isAtMarker())
+                               removeMarkerAtCurrentPosition();
+                           else
+                               addMarkerAtCurrentPosition();
+                       });
+    handleMarkerAction(getMarkerActionParameterId("next"),
+                       nextMarkerActionPressed,
+                       [this]() { jumpToNextMarker(); });
 }
 
 void JamPTAudioProcessor::applyStemGainFromParameter(DemucsProcessor::Stem stem)
@@ -376,7 +579,11 @@ void JamPTAudioProcessor::applyPendingPlaybackRestore()
     if (! hasPreparedPlayback || ! pendingPlaybackRestore.isValid)
         return;
 
-    if (! loadAudioFile(pendingPlaybackRestore.audioFile))
+    const auto restored = pendingPlaybackRestore.cachedSourceEntryName.isNotEmpty()
+                            ? loadCachedSourceEntry(pendingPlaybackRestore.cachedSourceEntryName)
+                            : loadAudioFile(pendingPlaybackRestore.audioFile);
+
+    if (! restored)
     {
         pendingPlaybackRestore = {};
         return;

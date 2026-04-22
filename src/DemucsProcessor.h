@@ -36,6 +36,10 @@ public:
     bool isModelEnabled() const;
     void setStemGain(Stem stem, float gainLinear);
     float getStemGain(Stem stem) const;
+    void setStemSolo(Stem stem, bool shouldSolo);
+    bool isStemSolo(Stem stem) const;
+    void setStemMute(Stem stem, bool shouldMute);
+    bool isStemMuted(Stem stem) const;
     void seekTo(double positionSeconds, bool shouldResumeWhenBuffered);
     bool consumeAutoResumeIfReady();
     double getBufferProgress() const;
@@ -44,6 +48,20 @@ public:
     bool hasSeparationFailed() const;
     bool renderBufferedAudio(juce::AudioBuffer<float>& output, double startSeconds);
     juce::File getSourceAudioFile() const;
+    juce::File getSelectedCacheDirectory() const;
+    juce::File getSpectrogramCacheFile() const;
+    juce::Array<double> getMarkers() const;
+    bool hasMarkers() const;
+    bool hasMarkerNearPosition(double positionSeconds) const;
+    bool canAddMarkerAt(double positionSeconds, double durationSeconds) const;
+    bool addMarker(double positionSeconds, double durationSeconds);
+    bool removeMarkerNear(double positionSeconds);
+    bool getPreviousMarker(double positionSeconds, double& markerPositionSeconds) const;
+    bool getNextMarker(double positionSeconds, double& markerPositionSeconds) const;
+    juce::String getSelectedCacheEntryName() const;
+    juce::StringArray getCachedSourceEntryNames() const;
+    bool prepareSourceAudioFile(const juce::File& audioFile, juce::File& cachedSourceFile, juce::String& errorMessage) const;
+    bool resolveCachedSourceEntry(const juce::String& entryName, juce::File& cachedSourceFile, juce::String& errorMessage) const;
     juce::String getCacheRootPath() const;
     juce::String getLastProcessLog() const;
 
@@ -63,16 +81,26 @@ private:
     void updateBufferStatus();
     bool isDemucsAvailable(juce::String& errorMessage) const;
     juce::String resolveDemucsExecutable() const;
-    juce::String buildSourceCacheKey(const juce::File& audioFile) const;
     juce::File getCacheRootDirectory() const;
-    juce::File getStagedInputFile(const juce::File& audioFile, const juce::String& sourceKey) const;
-    juce::File getStemCacheDirectory(const juce::String& modelName, const juce::String& sourceKey) const;
+    juce::File getSourceMetadataFile(const juce::File& sourceDirectory) const;
+    juce::File getCachedSourceFile(const juce::File& sourceDirectory) const;
+    juce::File getSpectrogramCacheFile(const juce::File& sourceDirectory) const;
+    juce::File getStemCacheDirectory(const juce::String& modelName, const juce::File& sourceDirectory) const;
+    juce::Array<double> loadMarkersFromMetadata(const juce::File& sourceDirectory) const;
+    bool saveMarkersToMetadata(const juce::File& sourceDirectory, const juce::Array<double>& markers) const;
+    juce::String getUniqueSourceDirectoryName(const juce::String& preferredName) const;
+    juce::File findExistingSourceDirectory(const juce::File& audioFile) const;
+    bool writeSourceMetadata(const juce::File& sourceDirectory, const juce::File& originalAudioFile) const;
+    bool matchesSourceMetadata(const juce::File& sourceDirectory, const juce::File& audioFile) const;
     bool areStemFilesCached(const juce::File& stemDirectory) const;
-    bool ensureStagedInputFile(const juce::File& audioFile,
-                               const juce::String& sourceKey,
-                               juce::File& stagedInputFile,
-                               juce::String& errorMessage) const;
+    bool ensureCachedSourceFile(const juce::File& audioFile,
+                                juce::File& cachedSourceFile,
+                                juce::String& errorMessage) const;
+    bool normaliseDemucsStemLayout(const juce::File& stemDirectory,
+                                   const juce::String& stagedSourceBaseName,
+                                   juce::String& errorMessage) const;
     bool runDemucsCli(const juce::String& modelName,
+                      const juce::File& stemDirectory,
                       const juce::File& stagedInputFile,
                       juce::String& errorMessage);
     std::shared_ptr<SeparatedAudioData> loadSeparatedAudioFromCache(const juce::File& stemDirectory,
@@ -87,7 +115,8 @@ private:
     juce::String loadedModelName { getDefaultModelName() };
     juce::String lastModelError;
     juce::File sourceAudioFile;
-    juce::String sourceCacheKey;
+    juce::File selectedCacheDirectory;
+    juce::String selectedCacheEntryName;
     bool loaded = false;
     bool modelEnabled = true;
     bool separationInProgress = false;
@@ -101,6 +130,9 @@ private:
     juce::String bufferStatusText { "Select a Demucs model" };
     juce::String lastInferenceError;
     juce::String lastProcessLog;
+    juce::Array<double> markers;
     std::shared_ptr<const SeparatedAudioData> separatedAudioData;
     std::array<float, static_cast<size_t>(Stem::count)> stemGains { 1.0f, 1.0f, 1.0f, 1.0f };
+    std::array<bool, static_cast<size_t>(Stem::count)> stemSoloStates { false, false, false, false };
+    std::array<bool, static_cast<size_t>(Stem::count)> stemMuteStates { false, false, false, false };
 };

@@ -45,12 +45,29 @@ public:
     bool isModelEnabled() const;
     void setStemGain(DemucsProcessor::Stem stem, float gainLinear);
     float getStemGain(DemucsProcessor::Stem stem) const;
+    void setStemSolo(DemucsProcessor::Stem stem, bool shouldSolo);
+    bool isStemSolo(DemucsProcessor::Stem stem) const;
+    void setStemMute(DemucsProcessor::Stem stem, bool shouldMute);
+    bool isStemMuted(DemucsProcessor::Stem stem) const;
+    juce::Array<double> getMarkers() const;
+    bool hasMarkers() const;
+    bool isAtMarker() const;
+    bool canAddMarker() const;
+    bool addMarkerAtCurrentPosition();
+    bool removeMarkerAtCurrentPosition();
+    bool jumpToPreviousMarker();
+    bool jumpToNextMarker();
     double getModelBufferProgress() const;
     juce::String getModelBufferStatusText() const;
     bool isStemSeparationReady() const;
     bool hasSeparationFailed() const;
     juce::File getLoadedAudioFile() const;
     juce::String getLoadedAudioFileName() const;
+    bool loadCachedSourceEntry(const juce::String& entryName);
+    juce::StringArray getCachedSourceEntryNames() const;
+    juce::String getSelectedCacheEntryName() const;
+    juce::File getSelectedCacheDirectory() const;
+    juce::File getSpectrogramCacheFile() const;
     AudioFilePlayer::PlaybackState getPlaybackState() const;
     double getPlaybackPositionSeconds() const;
     double getPlaybackDurationSeconds() const;
@@ -63,14 +80,17 @@ public:
     APVTS& getValueTreeState();
     static APVTS::ParameterLayout createParameterLayout();
     static juce::String getStemParameterId(DemucsProcessor::Stem stem);
+    static juce::String getMarkerActionParameterId(const juce::String& actionName);
     void refreshBackendStateFromLoadedFile();
 
 private:
     void syncStemGainsFromParameters();
     void applyStemGainFromParameter(DemucsProcessor::Stem stem);
+    void processMarkerActionParameters();
     struct PendingPlaybackRestore
     {
         juce::File audioFile;
+        juce::String cachedSourceEntryName;
         double positionSeconds { 0.0 };
         AudioFilePlayer::PlaybackState playbackState { AudioFilePlayer::PlaybackState::stopped };
         bool isValid { false };
@@ -83,6 +103,9 @@ private:
     APVTS valueTreeState;
     PendingPlaybackRestore pendingPlaybackRestore;
     bool hasPreparedPlayback { false };
+    bool previousMarkerActionPressed { false };
+    bool toggleMarkerActionPressed { false };
+    bool nextMarkerActionPressed { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(JamPTAudioProcessor)
 };
