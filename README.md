@@ -2,6 +2,8 @@
 
 Jam-PT is a macOS stem-mixing plugin built with JUCE and CMake. It ships as `Audio Unit` and `Standalone`, uses the external `demucs` CLI to render stems offline, and then mixes the generated `drums`, `bass`, `other`, and `vocals` stems in real time inside the plugin.
 
+![Jam-PT GUI](assets/gui.png)
+
 ## What It Does
 
 Jam-PT lets you:
@@ -16,6 +18,14 @@ Jam-PT lets you:
 - place persistent markers and jump between them
 
 The plugin does not embed Demucs, PyTorch, CoreML, or any model runtime internally. All separation is delegated to the external `demucs` executable already installed on the machine.
+
+## Intended Use
+
+Jam-PT was designed first of all for individual practice, personal study, and musical fun.
+
+The idea is simple: load a song you love, separate it into stems, and then reshape the mix so you can play along with it in a more useful way. You might lower the guitar-heavy parts to make room for your own instrument, mute the vocals to sing over the track, isolate the rhythm section to study groove and timing, or jump between markers to rehearse the same passage again and again.
+
+In that sense, the plugin is meant to help you study with your favorite records and improvise alongside the artists that inspired you. It is not just a technical stem-separation frontend: it is a practice companion built for learning parts, training your ear, exploring arrangements, and enjoying the feeling of playing together with your musical heroes.
 
 ## Current Architecture
 
