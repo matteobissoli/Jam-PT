@@ -59,7 +59,7 @@ target_sources(Jam-PT
         src/PluginProcessor.cpp
         src/PluginEditor.cpp
         src/AudioFilePlayer.cpp
-        src/CoreMLProcessor.mm
+        src/DemucsProcessor.mm
 )
 
 target_include_directories(Jam-PT
@@ -74,13 +74,8 @@ target_compile_definitions(Jam-PT
         JUCE_VST3_CAN_REPLACE_VST2=0
 )
 
-find_library(COREML_FRAMEWORK CoreML REQUIRED)
-find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
-
 target_link_libraries(Jam-PT
     PRIVATE
-        ${COREML_FRAMEWORK}
-        ${FOUNDATION_FRAMEWORK}
         juce::juce_audio_utils
         juce::juce_audio_formats
         juce::juce_audio_processors

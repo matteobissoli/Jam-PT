@@ -2,11 +2,13 @@
 
 #include <JuceHeader.h>
 #include "AudioFilePlayer.h"
-#include "CoreMLProcessor.h"
+#include "DemucsProcessor.h"
 
 class JamPTAudioProcessor final : public juce::AudioProcessor
 {
 public:
+    using APVTS = juce::AudioProcessorValueTreeState;
+
     JamPTAudioProcessor();
     ~JamPTAudioProcessor() override;
 
@@ -34,14 +36,53 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
 
     bool loadAudioFile(const juce::File& file);
-    bool loadModelFile(const juce::File& file, juce::String& errorMessage);
+    bool startPlayback();
+    bool pausePlayback();
+    void stopPlayback();
+    void setPlaybackPositionSeconds(double seconds);
+    bool selectModel(const juce::String& modelName, juce::String& errorMessage);
+    void setModelEnabled(bool shouldEnable);
+    bool isModelEnabled() const;
+    void setStemGain(DemucsProcessor::Stem stem, float gainLinear);
+    float getStemGain(DemucsProcessor::Stem stem) const;
+    double getModelBufferProgress() const;
+    juce::String getModelBufferStatusText() const;
+    bool isStemSeparationReady() const;
+    bool hasSeparationFailed() const;
+    juce::File getLoadedAudioFile() const;
     juce::String getLoadedAudioFileName() const;
+    AudioFilePlayer::PlaybackState getPlaybackState() const;
+    double getPlaybackPositionSeconds() const;
+    double getPlaybackDurationSeconds() const;
+    double getPlaybackProgress() const;
+    juce::StringArray getAvailableModelNames() const;
     juce::String getLoadedModelName() const;
     bool isModelLoaded() const;
+    juce::String getCacheRootPath() const;
+    juce::String getLastDemucsLog() const;
+    APVTS& getValueTreeState();
+    static APVTS::ParameterLayout createParameterLayout();
+    static juce::String getStemParameterId(DemucsProcessor::Stem stem);
+    void refreshBackendStateFromLoadedFile();
 
 private:
+    void syncStemGainsFromParameters();
+    void applyStemGainFromParameter(DemucsProcessor::Stem stem);
+    struct PendingPlaybackRestore
+    {
+        juce::File audioFile;
+        double positionSeconds { 0.0 };
+        AudioFilePlayer::PlaybackState playbackState { AudioFilePlayer::PlaybackState::stopped };
+        bool isValid { false };
+    };
+
+    void applyPendingPlaybackRestore();
+
     AudioFilePlayer player;
-    CoreMLProcessor coreMLProcessor;
+    DemucsProcessor demucsProcessor;
+    APVTS valueTreeState;
+    PendingPlaybackRestore pendingPlaybackRestore;
+    bool hasPreparedPlayback { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(JamPTAudioProcessor)
 };
