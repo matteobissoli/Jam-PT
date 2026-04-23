@@ -63,18 +63,22 @@ DemucsCache/
     source.wav
     spectrogram.thumb
     htdemucs/
-      drums.wav
-      bass.wav
-      other.wav
-      vocals.wav
+      drums.flac
+      bass.flac
+      other.flac
+      vocals.flac
 ```
 
 ### Cache contents
 
 - `source.<ext>`: the cached copy of the selected source file, preserving the original extension
 - `spectrogram.thumb`: cached waveform/spectrogram thumbnail used by the UI
-- `<model>/`: one folder per Demucs model
+- `<model>/`: one folder per Demucs model containing lossless cached stems in `FLAC`
 - `cache-info.xml`: relative metadata for the cached source and its markers
+
+Demucs itself still renders temporary `WAV` files, but Jam-PT converts them to `FLAC` internally and removes the temporary `WAV` output when the import finishes.
+
+If an older cache already contains legacy stem files as `WAV`, Jam-PT migrates them to `FLAC` automatically and deletes the old `WAV` copies.
 
 ### Metadata strategy
 
@@ -132,8 +136,8 @@ Jam-PT supports persistent markers stored in `cache-info.xml`.
 
 - `+` adds a marker at the current position
 - if the playhead is already on a marker, `+` becomes `-` and removes it
-- `Prev` jumps to the previous marker
-- `Next` jumps to the next marker
+- `Prev` jumps to the previous marker when markers exist, otherwise it seeks backward by `10s`
+- `Next` jumps to the next marker when markers exist, otherwise it seeks forward by `10s`
 
 Marker actions are available only when the plugin is in a ready state and do not force a transport state change by themselves.
 
@@ -146,14 +150,15 @@ For AU hosts, Jam-PT exposes these controls as automatable parameters:
 - `Play/Pause`
 - `Stop`
 - `Previous Marker`
-- `Toggle Marker`
+- `Add Marker`
+- `Remove Marker`
 - `Next Marker`
 - `Vocals Solo`, `Vocals Mute`
 - `Drums Solo`, `Drums Mute`
 - `Bass Solo`, `Bass Mute`
 - `Other Solo`, `Other Mute`
 
-Hosts may render these as checkboxes or generic toggles rather than the exact JUCE button styling used in the plugin editor.
+`Stop`, `Previous Marker`, `Add Marker`, `Remove Marker`, and `Next Marker` are exposed as impulse-style actions for host mapping. When no markers exist, `Previous Marker` and `Next Marker` fall back to `-10s` and `+10s` seeks. Hosts may still render them as generic boolean controls rather than the exact JUCE button styling used in the plugin editor.
 
 ## Demucs Setup
 
@@ -307,17 +312,21 @@ If validation fails or the plugin is not listed, rebuild the `AU` target in `Rel
 ## Host Notes
 
 - `AU` is exposed as a generator (`augn`) for host use
-- `VST3` is available for compatible hosts
+- `VST3` is available for compatible hosts, but it is not tagged with an AU-style `generator` type
 - `Standalone` exists mainly for development and debugging
 - MainStage should see the AU as a generator, not as an insert FX
+- the `generator` classification is specific to the `AU` build via `AU_MAIN_TYPE`; it does not carry over to `VST3`
 - the plugin falls back to playing the cached source file until separated stems are ready
 - once stems exist in cache for the selected source and model, Jam-PT reuses them automatically
+- cached stems are stored as lossless `FLAC`, and legacy cached `WAV` stems are migrated automatically
+- temporary `WAV` files produced during Demucs runs are cleaned up after conversion
 
 ## Current Limitations
 
 - separation is offline per loaded file, so long files can still take noticeable time and disk space
 - the plugin depends on an external Demucs runtime with compatible Python, FFmpeg, and TorchCodec
 - only the stems produced by the selected Demucs model are reused
+- stem cache migration happens on demand when an older `WAV`-based cache is encountered
 - no automated test suite is included yet
 
 ## License

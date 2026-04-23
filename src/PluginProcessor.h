@@ -86,6 +86,7 @@ public:
     void refreshBackendStateFromLoadedFile();
 
 private:
+    static constexpr float momentaryActionThreshold = 0.5f;
     void syncStemGainsFromParameters();
     void syncStemTogglesFromParameters();
     void applyStemGainFromParameter(DemucsProcessor::Stem stem);
@@ -109,7 +110,8 @@ private:
     bool playPauseActionPressed { false };
     bool stopActionPressed { false };
     bool previousMarkerActionPressed { false };
-    bool toggleMarkerActionPressed { false };
+    bool addMarkerActionPressed { false };
+    bool removeMarkerActionPressed { false };
     bool nextMarkerActionPressed { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(JamPTAudioProcessor)

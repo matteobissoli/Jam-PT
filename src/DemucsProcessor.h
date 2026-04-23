@@ -92,6 +92,7 @@ private:
     juce::File findExistingSourceDirectory(const juce::File& audioFile) const;
     bool writeSourceMetadata(const juce::File& sourceDirectory, const juce::File& originalAudioFile) const;
     bool matchesSourceMetadata(const juce::File& sourceDirectory, const juce::File& audioFile) const;
+    bool migrateLegacyStemCache(const juce::File& stemDirectory, juce::String& errorMessage) const;
     bool areStemFilesCached(const juce::File& stemDirectory) const;
     bool ensureCachedSourceFile(const juce::File& audioFile,
                                 juce::File& cachedSourceFile,
@@ -99,6 +100,11 @@ private:
     bool normaliseDemucsStemLayout(const juce::File& stemDirectory,
                                    const juce::String& stagedSourceBaseName,
                                    juce::String& errorMessage) const;
+    bool convertStemToCacheFormat(const juce::File& sourceStemFile,
+                                  const juce::File& targetStemFile,
+                                  juce::String& errorMessage) const;
+    void cleanupDemucsTemporaryStemFiles(const juce::File& stemDirectory,
+                                         const juce::String& stagedSourceBaseName) const;
     bool runDemucsCli(const juce::String& modelName,
                       const juce::File& stemDirectory,
                       const juce::File& stagedInputFile,
@@ -108,6 +114,9 @@ private:
                                                                     juce::String& errorMessage);
     float getSampleAt(const juce::AudioBuffer<float>& buffer, int channel, double sourceSamplePosition) const;
     static juce::String getStemFileName(Stem stem);
+    static juce::String getDemucsOutputStemFileName(Stem stem);
+    static juce::String getLegacyStemFileName(Stem stem);
+    static juce::File getCachedStemFile(const juce::File& stemDirectory, Stem stem);
 
     mutable juce::CriticalSection stateLock;
     juce::AudioFormatManager formatManager;

@@ -625,13 +625,12 @@ void JamPTAudioProcessorEditor::refreshLabels()
     const auto hasAudioFile = audioFile.isNotEmpty();
     const auto stemsReady = audioProcessor.isStemSeparationReady();
     const auto transportEnabled = hasAudioFile && stemsReady;
-    const auto hasMarkers = stemsReady && audioProcessor.hasMarkers();
     const auto isAtMarker = stemsReady && audioProcessor.isAtMarker();
     const auto canAddMarker = stemsReady && audioProcessor.canAddMarker();
     playbackButton.setEnabled(transportEnabled);
     stopButton.setEnabled(transportEnabled);
-    prevButton.setEnabled(hasMarkers);
-    nextButton.setEnabled(hasMarkers);
+    prevButton.setEnabled(stemsReady);
+    nextButton.setEnabled(stemsReady);
     plusButton.setEnabled(isAtMarker || canAddMarker);
     plusButton.setButtonText(isAtMarker ? "-" : "+");
     openCacheFolderButton.setEnabled(audioProcessor.getSelectedCacheDirectory().isDirectory());

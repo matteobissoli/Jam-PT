@@ -653,11 +653,11 @@ void DemucsProcessor::run()
         const auto stemDirectory = getStemCacheDirectory(modelName, sourceDirectory);
         std::shared_ptr<SeparatedAudioData> separatedResult;
 
-        if (areStemFilesCached(stemDirectory))
+        if (migrateLegacyStemCache(stemDirectory, errorMessage) && areStemFilesCached(stemDirectory))
         {
             separatedResult = loadSeparatedAudioFromCache(stemDirectory, generation, errorMessage);
         }
-        else
+        else if (errorMessage.isEmpty())
         {
             juce::File stagedInputFile;
             if (ensureCachedSourceFile(audioFile, stagedInputFile, errorMessage)
@@ -970,11 +970,41 @@ bool DemucsProcessor::matchesSourceMetadata(const juce::File& sourceDirectory, c
         && xml->getStringAttribute("originalModified") == juce::String(audioFile.getLastModificationTime().toMilliseconds());
 }
 
+bool DemucsProcessor::migrateLegacyStemCache(const juce::File& stemDirectory, juce::String& errorMessage) const
+{
+    errorMessage.clear();
+
+    if (! stemDirectory.isDirectory())
+        return true;
+
+    for (const auto stem : stemOrder)
+    {
+        const auto flacStemFile = stemDirectory.getChildFile(getStemFileName(stem));
+        const auto legacyStemFile = stemDirectory.getChildFile(getLegacyStemFileName(stem));
+
+        if (flacStemFile.existsAsFile())
+        {
+            if (legacyStemFile.existsAsFile() && ! legacyStemFile.deleteFile())
+            {
+                errorMessage = "Unable to remove legacy cached stem " + legacyStemFile.getFileName();
+                return false;
+            }
+
+            continue;
+        }
+
+        if (legacyStemFile.existsAsFile() && ! convertStemToCacheFormat(legacyStemFile, flacStemFile, errorMessage))
+            return false;
+    }
+
+    return true;
+}
+
 bool DemucsProcessor::areStemFilesCached(const juce::File& stemDirectory) const
 {
     for (const auto stem : stemOrder)
     {
-        if (! stemDirectory.getChildFile(getStemFileName(stem)).existsAsFile())
+        if (! getCachedStemFile(stemDirectory, stem).existsAsFile())
             return false;
     }
 
@@ -1039,6 +1069,7 @@ bool DemucsProcessor::runDemucsCli(const juce::String& modelName,
                                    juce::String& errorMessage)
 {
     errorMessage.clear();
+    const auto stagedSourceBaseName = stagedInputFile.getFileNameWithoutExtension();
     const auto demucsExecutable = resolveDemucsExecutable();
     if (demucsExecutable.isEmpty())
     {
@@ -1202,6 +1233,7 @@ bool DemucsProcessor::runDemucsCli(const juce::String& modelName,
     if (threadShouldExit())
     {
         errorMessage = "Demucs process interrupted.";
+        cleanupDemucsTemporaryStemFiles(stemDirectory, stagedSourceBaseName);
         return false;
     }
 
@@ -1211,18 +1243,20 @@ bool DemucsProcessor::runDemucsCli(const juce::String& modelName,
         errorMessage = "Demucs runtime is missing Python package 'torchcodec'. "
                        "Install it into the pipx demucs environment, for example with: "
                        "`pipx inject demucs torchcodec`";
+        cleanupDemucsTemporaryStemFiles(stemDirectory, stagedSourceBaseName);
         return false;
     }
 
     if (exitCode != 0)
     {
         errorMessage = processOutput.isNotEmpty() ? processOutput : "Demucs process failed.";
+        cleanupDemucsTemporaryStemFiles(stemDirectory, stagedSourceBaseName);
         return false;
     }
 
-    return normaliseDemucsStemLayout(stemDirectory,
-                                     stagedInputFile.getFileNameWithoutExtension(),
-                                     errorMessage);
+    const auto normalised = normaliseDemucsStemLayout(stemDirectory, stagedSourceBaseName, errorMessage);
+    cleanupDemucsTemporaryStemFiles(stemDirectory, stagedSourceBaseName);
+    return normalised;
 }
 
 bool DemucsProcessor::normaliseDemucsStemLayout(const juce::File& stemDirectory,
@@ -1237,7 +1271,7 @@ bool DemucsProcessor::normaliseDemucsStemLayout(const juce::File& stemDirectory,
 
     for (const auto stem : stemOrder)
     {
-        const auto sourceStemFile = nestedStemDirectory.getChildFile(getStemFileName(stem));
+        const auto sourceStemFile = nestedStemDirectory.getChildFile(getDemucsOutputStemFileName(stem));
         const auto targetStemFile = stemDirectory.getChildFile(getStemFileName(stem));
 
         if (! sourceStemFile.existsAsFile())
@@ -1252,18 +1286,115 @@ bool DemucsProcessor::normaliseDemucsStemLayout(const juce::File& stemDirectory,
             return false;
         }
 
-        if (! sourceStemFile.moveFileTo(targetStemFile))
+        const auto legacyStemFile = stemDirectory.getChildFile(getLegacyStemFileName(stem));
+        if (legacyStemFile.existsAsFile() && ! legacyStemFile.deleteFile())
         {
-            if (! sourceStemFile.copyFileTo(targetStemFile) || ! sourceStemFile.deleteFile())
-            {
-                errorMessage = "Unable to normalise demucs output for " + targetStemFile.getFileName();
-                return false;
-            }
+            errorMessage = "Unable to remove legacy cached stem " + legacyStemFile.getFileName();
+            return false;
         }
+
+        if (! convertStemToCacheFormat(sourceStemFile, targetStemFile, errorMessage))
+            return false;
     }
 
     nestedStemDirectory.deleteRecursively();
     return areStemFilesCached(stemDirectory);
+}
+
+bool DemucsProcessor::convertStemToCacheFormat(const juce::File& sourceStemFile,
+                                               const juce::File& targetStemFile,
+                                               juce::String& errorMessage) const
+{
+    errorMessage.clear();
+
+    juce::AudioFormatManager conversionFormatManager;
+    conversionFormatManager.registerBasicFormats();
+
+    std::unique_ptr<juce::AudioFormatReader> reader(conversionFormatManager.createReaderFor(sourceStemFile));
+    if (reader == nullptr)
+    {
+        errorMessage = "Unable to read demucs output stem " + sourceStemFile.getFileName();
+        return false;
+    }
+
+    if (reader->sampleRate <= 0.0 || reader->numChannels <= 0)
+    {
+        errorMessage = "Invalid audio format for demucs output stem " + sourceStemFile.getFileName();
+        return false;
+    }
+
+    auto outputStream = std::make_unique<juce::FileOutputStream>(targetStemFile);
+    if (! outputStream->openedOk())
+    {
+        errorMessage = "Unable to create cached stem " + targetStemFile.getFileName();
+        return false;
+    }
+
+    juce::FlacAudioFormat flacFormat;
+    std::unique_ptr<juce::AudioFormatWriter> writer(flacFormat.createWriterFor(outputStream.get(),
+                                                                               reader->sampleRate,
+                                                                               static_cast<unsigned int>(reader->numChannels),
+                                                                               static_cast<unsigned int>(reader->bitsPerSample > 0 ? reader->bitsPerSample : 24),
+                                                                               {},
+                                                                               0));
+    if (writer == nullptr)
+    {
+        errorMessage = "Unable to create FLAC writer for " + targetStemFile.getFileName();
+        return false;
+    }
+
+    outputStream.release();
+
+    constexpr int samplesPerChunk = 32768;
+    juce::AudioBuffer<float> tempBuffer(static_cast<int>(reader->numChannels), samplesPerChunk);
+
+    juce::int64 samplesRemaining = reader->lengthInSamples;
+    juce::int64 currentSample = 0;
+    while (samplesRemaining > 0)
+    {
+        const auto samplesThisChunk = static_cast<int>(juce::jmin<juce::int64>(samplesRemaining, samplesPerChunk));
+        tempBuffer.clear();
+
+        if (! reader->read(&tempBuffer, 0, samplesThisChunk, currentSample, true, true))
+        {
+            errorMessage = "Unable to read audio while converting " + sourceStemFile.getFileName();
+            return false;
+        }
+
+        if (! writer->writeFromAudioSampleBuffer(tempBuffer, 0, samplesThisChunk))
+        {
+            errorMessage = "Unable to write FLAC stem " + targetStemFile.getFileName();
+            return false;
+        }
+
+        currentSample += samplesThisChunk;
+        samplesRemaining -= samplesThisChunk;
+    }
+
+    writer.reset();
+
+    if (! sourceStemFile.deleteFile())
+    {
+        errorMessage = "Converted stem to FLAC but could not remove temporary file " + sourceStemFile.getFileName();
+        return false;
+    }
+
+    return true;
+}
+
+void DemucsProcessor::cleanupDemucsTemporaryStemFiles(const juce::File& stemDirectory,
+                                                      const juce::String& stagedSourceBaseName) const
+{
+    const auto nestedStemDirectory = stemDirectory.getChildFile(stagedSourceBaseName);
+    if (nestedStemDirectory.exists())
+        nestedStemDirectory.deleteRecursively();
+
+    for (const auto stem : stemOrder)
+    {
+        const auto legacyStemFile = stemDirectory.getChildFile(getLegacyStemFileName(stem));
+        if (legacyStemFile.existsAsFile())
+            legacyStemFile.deleteFile();
+    }
 }
 
 std::shared_ptr<DemucsProcessor::SeparatedAudioData> DemucsProcessor::loadSeparatedAudioFromCache(const juce::File& stemDirectory,
@@ -1276,7 +1407,7 @@ std::shared_ptr<DemucsProcessor::SeparatedAudioData> DemucsProcessor::loadSepara
     for (const auto stem : stemOrder)
     {
         const auto stemIndex = static_cast<size_t>(stem);
-        const auto stemFile = stemDirectory.getChildFile(getStemFileName(stem));
+        const auto stemFile = getCachedStemFile(stemDirectory, stem);
 
         std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(stemFile));
         if (reader == nullptr)
@@ -1323,6 +1454,21 @@ juce::String DemucsProcessor::getStemFileName(Stem stem)
 {
     switch (stem)
     {
+        case Stem::vocals: return "vocals.flac";
+        case Stem::drums: return "drums.flac";
+        case Stem::bass: return "bass.flac";
+        case Stem::other: return "other.flac";
+        case Stem::count: break;
+    }
+
+    jassertfalse;
+    return {};
+}
+
+juce::String DemucsProcessor::getDemucsOutputStemFileName(Stem stem)
+{
+    switch (stem)
+    {
         case Stem::vocals: return "vocals.wav";
         case Stem::drums: return "drums.wav";
         case Stem::bass: return "bass.wav";
@@ -1332,4 +1478,18 @@ juce::String DemucsProcessor::getStemFileName(Stem stem)
 
     jassertfalse;
     return {};
+}
+
+juce::String DemucsProcessor::getLegacyStemFileName(Stem stem)
+{
+    return getDemucsOutputStemFileName(stem);
+}
+
+juce::File DemucsProcessor::getCachedStemFile(const juce::File& stemDirectory, Stem stem)
+{
+    const auto flacFile = stemDirectory.getChildFile(getStemFileName(stem));
+    if (flacFile.existsAsFile())
+        return flacFile;
+
+    return stemDirectory.getChildFile(getLegacyStemFileName(stem));
 }

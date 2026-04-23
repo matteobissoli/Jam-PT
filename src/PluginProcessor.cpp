@@ -1,6 +1,11 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+namespace
+{
+constexpr double markerSeekFallbackSeconds = 10.0;
+}
+
 JamPTAudioProcessor::JamPTAudioProcessor()
     : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       valueTreeState(*this, nullptr, "Parameters", createParameterLayout())
@@ -338,6 +343,13 @@ bool JamPTAudioProcessor::jumpToPreviousMarker()
     if (! isStemSeparationReady())
         return false;
 
+    if (! demucsProcessor.hasMarkers())
+    {
+        const auto targetPositionSeconds = juce::jmax(0.0, getPlaybackPositionSeconds() - markerSeekFallbackSeconds);
+        setPlaybackPositionSeconds(targetPositionSeconds);
+        return true;
+    }
+
     double markerPositionSeconds = 0.0;
     if (! demucsProcessor.getPreviousMarker(getPlaybackPositionSeconds(), markerPositionSeconds))
         return false;
@@ -350,6 +362,14 @@ bool JamPTAudioProcessor::jumpToNextMarker()
 {
     if (! isStemSeparationReady())
         return false;
+
+    if (! demucsProcessor.hasMarkers())
+    {
+        const auto targetPositionSeconds = juce::jmin(getPlaybackDurationSeconds(),
+                                                      getPlaybackPositionSeconds() + markerSeekFallbackSeconds);
+        setPlaybackPositionSeconds(targetPositionSeconds);
+        return true;
+    }
 
     double markerPositionSeconds = 0.0;
     if (! demucsProcessor.getNextMarker(getPlaybackPositionSeconds(), markerPositionSeconds))
@@ -499,6 +519,25 @@ JamPTAudioProcessor::APVTS::ParameterLayout JamPTAudioProcessor::createParameter
                                                                attributes));
     };
 
+    auto addMomentaryActionParameter = [&layout](const juce::String& id, const juce::String& name)
+    {
+        auto attributes = juce::AudioParameterFloatAttributes()
+                            .withStringFromValueFunction([](float value, int)
+                            {
+                                return value >= momentaryActionThreshold ? "Trigger" : "Idle";
+                            })
+                            .withValueFromStringFunction([](const juce::String& text)
+                            {
+                                return text.equalsIgnoreCase("Trigger") ? 1.0f : 0.0f;
+                            });
+
+        layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID(id, 1),
+                                                               name,
+                                                               juce::NormalisableRange<float>(0.0f, 1.0f, 1.0f),
+                                                               0.0f,
+                                                               attributes));
+    };
+
     addStemParameter(getStemParameterId(DemucsProcessor::Stem::vocals), "Vocals");
     addStemParameter(getStemParameterId(DemucsProcessor::Stem::drums), "Drums");
     addStemParameter(getStemParameterId(DemucsProcessor::Stem::bass), "Bass");
@@ -507,18 +546,11 @@ JamPTAudioProcessor::APVTS::ParameterLayout JamPTAudioProcessor::createParameter
     layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getControlActionParameterId("play_pause"), 1),
                                                           "Play/Pause",
                                                           false));
-    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getControlActionParameterId("stop"), 1),
-                                                          "Stop",
-                                                          false));
-    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getMarkerActionParameterId("prev"), 1),
-                                                          "Previous Marker",
-                                                          false));
-    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getMarkerActionParameterId("toggle"), 1),
-                                                          "Toggle Marker",
-                                                          false));
-    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getMarkerActionParameterId("next"), 1),
-                                                          "Next Marker",
-                                                          false));
+    addMomentaryActionParameter(getControlActionParameterId("stop"), "Stop");
+    addMomentaryActionParameter(getMarkerActionParameterId("prev"), "Previous Marker");
+    addMomentaryActionParameter(getMarkerActionParameterId("add"), "Add Marker");
+    addMomentaryActionParameter(getMarkerActionParameterId("remove"), "Remove Marker");
+    addMomentaryActionParameter(getMarkerActionParameterId("next"), "Next Marker");
 
     const auto addStemToggleParameters = [&layout](DemucsProcessor::Stem stem, const juce::String& stemName)
     {
@@ -620,9 +652,16 @@ void JamPTAudioProcessor::processControlActionParameters()
         if (rawValue == nullptr)
             return;
 
-        const auto isPressed = rawValue->load() >= 0.5f;
+        const auto isPressed = rawValue->load() >= momentaryActionThreshold;
         if (isPressed && ! previousPressedState)
+        {
             action();
+            if (auto* parameter = valueTreeState.getParameter(parameterId))
+                parameter->setValueNotifyingHost(0.0f);
+
+            previousPressedState = false;
+            return;
+        }
 
         previousPressedState = isPressed;
     };
@@ -644,15 +683,12 @@ void JamPTAudioProcessor::processControlActionParameters()
     handleMomentaryAction(getMarkerActionParameterId("prev"),
                           previousMarkerActionPressed,
                           [this]() { jumpToPreviousMarker(); });
-    handleMomentaryAction(getMarkerActionParameterId("toggle"),
-                          toggleMarkerActionPressed,
-                          [this]()
-                          {
-                              if (isAtMarker())
-                                  removeMarkerAtCurrentPosition();
-                              else
-                                  addMarkerAtCurrentPosition();
-                          });
+    handleMomentaryAction(getMarkerActionParameterId("add"),
+                          addMarkerActionPressed,
+                          [this]() { addMarkerAtCurrentPosition(); });
+    handleMomentaryAction(getMarkerActionParameterId("remove"),
+                          removeMarkerActionPressed,
+                          [this]() { removeMarkerAtCurrentPosition(); });
     handleMomentaryAction(getMarkerActionParameterId("next"),
                           nextMarkerActionPressed,
                           [this]() { jumpToNextMarker(); });
