@@ -41,7 +41,7 @@ juce_add_plugin(Jam-PT
     BUNDLE_ID "com.matteobissoli.jampt"
     PLUGIN_MANUFACTURER_CODE MtBs
     PLUGIN_CODE JmPt
-    FORMATS AU Standalone
+    FORMATS AU VST3 Standalone
     PRODUCT_NAME "Jam-PT"
     COPY_PLUGIN_AFTER_BUILD TRUE
     IS_SYNTH FALSE

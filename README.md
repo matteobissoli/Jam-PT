@@ -1,8 +1,14 @@
 # Jam-PT
 
-Jam-PT is a macOS stem-mixing plugin built with JUCE and CMake. It ships as `Audio Unit` and `Standalone`, uses the external `demucs` CLI to render stems offline, and then mixes the generated `drums`, `bass`, `other`, and `vocals` stems in real time inside the plugin.
+Jam-PT is a macOS stem-mixing plugin built with JUCE and CMake. It ships as `Audio Unit`, `VST3`, and `Standalone`, uses the external `demucs` CLI to render stems offline, and then mixes the generated `drums`, `bass`, `other`, and `vocals` stems in real time inside the plugin.
 
 ![Jam-PT GUI](assets/gui.png)
+
+## Intended Use
+
+Jam-PT was designed for practice, personal study, and musical fun. Load a song you love, separate it into stems, and reshape the mix so you can play along more usefully: lower dense accompaniment, mute vocals, isolate the rhythm section, or jump between markers to rehearse the same passage again and again.
+
+It is not just a technical stem-separation frontend. It is a practice companion built for learning parts, training your ear, exploring arrangements, and enjoying the feeling of playing together with your musical heroes.
 
 ## What It Does
 
@@ -19,14 +25,6 @@ Jam-PT lets you:
 
 The plugin does not embed Demucs, PyTorch, CoreML, or any model runtime internally. All separation is delegated to the external `demucs` executable already installed on the machine.
 
-## Intended Use
-
-Jam-PT was designed first of all for individual practice, personal study, and musical fun.
-
-The idea is simple: load a song you love, separate it into stems, and then reshape the mix so you can play along with it in a more useful way. You might lower the guitar-heavy parts to make room for your own instrument, mute the vocals to sing over the track, isolate the rhythm section to study groove and timing, or jump between markers to rehearse the same passage again and again.
-
-In that sense, the plugin is meant to help you study with your favorite records and improvise alongside the artists that inspired you. It is not just a technical stem-separation frontend: it is a practice companion built for learning parts, training your ear, exploring arrangements, and enjoying the feeling of playing together with your musical heroes.
-
 ## Current Architecture
 
 - `src/PluginProcessor.*`: JUCE processor lifecycle, state restore, playback routing, parameter handling
@@ -40,6 +38,7 @@ In that sense, the plugin is meant to help you study with your favorite records 
 
 - macOS
 - Audio Unit (`AU`)
+- VST3
 - Standalone app
 
 ## Requirements
@@ -262,23 +261,36 @@ cmake -S . -B build-xcode -G Xcode -DJAMPT_FETCH_JUCE=ON
 cmake --build build-xcode --config Debug --target Jam-PT
 ```
 
-After configure, you can open the generated Xcode project from the build folder and run either the Standalone target or the AU build from Xcode.
+To build the VST3 target explicitly:
+
+```bash
+cmake --build build-xcode --config Debug --target Jam-PT_VST3
+```
+
+After configure, you can open the generated Xcode project from the build folder and build the Standalone, `AU`, or `VST3` targets from Xcode.
 
 ## Install
 
-The project enables `COPY_PLUGIN_AFTER_BUILD`, so on a standard macOS development setup the Audio Unit is copied automatically after a successful build.
+The project enables `COPY_PLUGIN_AFTER_BUILD`, so on a standard macOS development setup the plugin formats are copied automatically after a successful build.
 
-If you need to install manually, copy the generated component bundle to:
+If you need to install AU manually, copy the generated component bundle to:
 
 ```text
 ~/Library/Audio/Plug-Ins/Components/
 ```
 
-Then rescan plugins in Logic Pro, MainStage, or your AU host if needed.
+If you need to install VST3 manually, copy the generated `.vst3` bundle to:
 
-## MainStage / Host Notes
+```text
+~/Library/Audio/Plug-Ins/VST3/
+```
+
+Then rescan plugins in Logic Pro, MainStage, your VST3 host, or your AU host if needed.
+
+## Host Notes
 
 - `AU` is the primary plugin target for host use
+- `VST3` is available for compatible hosts
 - `Standalone` exists mainly for development and debugging
 - the plugin falls back to playing the cached source file until separated stems are ready
 - once stems exist in cache for the selected source and model, Jam-PT reuses them automatically
