@@ -80,13 +80,16 @@ public:
     APVTS& getValueTreeState();
     static APVTS::ParameterLayout createParameterLayout();
     static juce::String getStemParameterId(DemucsProcessor::Stem stem);
+    static juce::String getStemToggleParameterId(DemucsProcessor::Stem stem, const juce::String& toggleKind);
+    static juce::String getControlActionParameterId(const juce::String& actionName);
     static juce::String getMarkerActionParameterId(const juce::String& actionName);
     void refreshBackendStateFromLoadedFile();
 
 private:
     void syncStemGainsFromParameters();
+    void syncStemTogglesFromParameters();
     void applyStemGainFromParameter(DemucsProcessor::Stem stem);
-    void processMarkerActionParameters();
+    void processControlActionParameters();
     struct PendingPlaybackRestore
     {
         juce::File audioFile;
@@ -103,6 +106,8 @@ private:
     APVTS valueTreeState;
     PendingPlaybackRestore pendingPlaybackRestore;
     bool hasPreparedPlayback { false };
+    bool playPauseActionPressed { false };
+    bool stopActionPressed { false };
     bool previousMarkerActionPressed { false };
     bool toggleMarkerActionPressed { false };
     bool nextMarkerActionPressed { false };

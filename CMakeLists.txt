@@ -8,6 +8,11 @@ set(CMAKE_OBJCXX_STANDARD 17)
 set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 set_property(GLOBAL PROPERTY USE_FOLDERS YES)
 
+if (APPLE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS deployment version" FORCE)
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Build universal macOS binaries" FORCE)
+endif()
+
 if (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     add_compile_options(
         -Wno-implicit-int-conversion
@@ -49,7 +54,7 @@ juce_add_plugin(Jam-PT
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
-    AU_MAIN_TYPE kAudioUnitType_Effect
+    AU_MAIN_TYPE kAudioUnitType_Generator
 )
 
 juce_generate_juce_header(Jam-PT)

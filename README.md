@@ -1,14 +1,8 @@
 # Jam-PT
 
-Jam-PT is a macOS stem-mixing plugin built with JUCE and CMake. It ships as `Audio Unit`, `VST3`, and `Standalone`, uses the external `demucs` CLI to render stems offline, and then mixes the generated `drums`, `bass`, `other`, and `vocals` stems in real time inside the plugin.
+Jam-PT is a macOS practice plugin built with JUCE and CMake. It uses the external `demucs` CLI to separate a song offline, then mixes the generated `drums`, `bass`, `other`, and `vocals` stems in real time inside the plugin.
 
 ![Jam-PT GUI](assets/gui.png)
-
-## Intended Use
-
-Jam-PT was designed for practice, personal study, and musical fun. Load a song you love, separate it into stems, and reshape the mix so you can play along more usefully: lower dense accompaniment, mute vocals, isolate the rhythm section, or jump between markers to rehearse the same passage again and again.
-
-It is not just a technical stem-separation frontend. It is a practice companion built for learning parts, training your ear, exploring arrangements, and enjoying the feeling of playing together with your musical heroes.
 
 ## What It Does
 
@@ -22,24 +16,23 @@ Jam-PT lets you:
 - use per-stem `Solo` and `Mute`
 - scrub the waveform and play the cached source
 - place persistent markers and jump between them
+- expose transport, marker, and stem toggle controls to AU hosts such as MainStage
 
 The plugin does not embed Demucs, PyTorch, CoreML, or any model runtime internally. All separation is delegated to the external `demucs` executable already installed on the machine.
-
-## Current Architecture
-
-- `src/PluginProcessor.*`: JUCE processor lifecycle, state restore, playback routing, parameter handling
-- `src/PluginEditor.*`: plugin UI, waveform, cache selector, controls, markers, stem controls
-- `src/AudioFilePlayer.*`: source-file playback and transport
-- `src/DemucsProcessor.*`: Demucs CLI orchestration, cache management, stem loading, marker persistence, stem mixing
-- `Resources/`: app/plugin resources
-- `Models/`: optional local development assets
 
 ## Formats And Platform
 
 - macOS
-- Audio Unit (`AU`)
+- Audio Unit generator (`AU`, `augn`)
 - VST3
 - Standalone app
+
+## Code Layout
+
+- `src/PluginProcessor.*`: plugin lifecycle, state restore, host parameters, transport routing
+- `src/PluginEditor.*`: plugin UI, waveform, transport, markers, stem controls
+- `src/AudioFilePlayer.*`: source-file playback
+- `src/DemucsProcessor.*`: Demucs CLI orchestration, cache management, stem loading, markers, stem mixing
 
 ## Requirements
 
@@ -98,7 +91,7 @@ Absolute source paths are intentionally not stored in cache metadata, so the cac
 
 ## GUI Overview
 
-The current editor layout is:
+The editor layout is:
 
 1. Cached-file selector
 2. `+` button to import a new source file
@@ -145,6 +138,22 @@ Jam-PT supports persistent markers stored in `cache-info.xml`.
 Marker actions are available only when the plugin is in a ready state and do not force a transport state change by themselves.
 
 To keep marker navigation useful during playback, `Prev` and `Next` use a tolerance window so repeated presses can continue moving across markers even while the playhead is advancing.
+
+## Host Controls
+
+For AU hosts, Jam-PT exposes these controls as automatable parameters:
+
+- `Play/Pause`
+- `Stop`
+- `Previous Marker`
+- `Toggle Marker`
+- `Next Marker`
+- `Vocals Solo`, `Vocals Mute`
+- `Drums Solo`, `Drums Mute`
+- `Bass Solo`, `Bass Mute`
+- `Other Solo`, `Other Mute`
+
+Hosts may render these as checkboxes or generic toggles rather than the exact JUCE button styling used in the plugin editor.
 
 ## Demucs Setup
 
@@ -254,7 +263,7 @@ cmake -S . -B build -G Xcode -DJAMPT_FETCH_JUCE=OFF -DJUCE_SOURCE_DIR=/path/to/J
 cmake --build build --config Release
 ```
 
-For this repository, the commonly used local development build is:
+For local development:
 
 ```bash
 cmake -S . -B build-xcode -G Xcode -DJAMPT_FETCH_JUCE=ON
@@ -267,11 +276,11 @@ To build the VST3 target explicitly:
 cmake --build build-xcode --config Debug --target Jam-PT_VST3
 ```
 
-After configure, you can open the generated Xcode project from the build folder and build the Standalone, `AU`, or `VST3` targets from Xcode.
+After configure, you can also open the generated Xcode project and build the `Standalone`, `AU`, or `VST3` targets from Xcode.
 
 ## Install
 
-The project enables `COPY_PLUGIN_AFTER_BUILD`, so on a standard macOS development setup the plugin formats are copied automatically after a successful build.
+The project enables `COPY_PLUGIN_AFTER_BUILD`, so the plugin formats are normally copied automatically after a successful build.
 
 If you need to install AU manually, copy the generated component bundle to:
 
@@ -285,13 +294,22 @@ If you need to install VST3 manually, copy the generated `.vst3` bundle to:
 ~/Library/Audio/Plug-Ins/VST3/
 ```
 
-Then rescan plugins in Logic Pro, MainStage, your VST3 host, or your AU host if needed.
+Then rescan plugins in Logic Pro, MainStage, or your preferred host if needed.
+
+If the AU still does not appear in MainStage after a rebuild, validate the component directly:
+
+```bash
+auval -v augn JmPt MtBs
+```
+
+If validation fails or the plugin is not listed, rebuild the `AU` target in `Release`, clear the Audio Unit cache if needed, and rescan the host.
 
 ## Host Notes
 
-- `AU` is the primary plugin target for host use
+- `AU` is exposed as a generator (`augn`) for host use
 - `VST3` is available for compatible hosts
 - `Standalone` exists mainly for development and debugging
+- MainStage should see the AU as a generator, not as an insert FX
 - the plugin falls back to playing the cached source file until separated stems are ready
 - once stems exist in cache for the selected source and model, Jam-PT reuses them automatically
 

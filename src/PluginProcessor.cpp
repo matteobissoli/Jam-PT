@@ -6,6 +6,7 @@ JamPTAudioProcessor::JamPTAudioProcessor()
       valueTreeState(*this, nullptr, "Parameters", createParameterLayout())
 {
     syncStemGainsFromParameters();
+    syncStemTogglesFromParameters();
     juce::String errorMessage;
     demucsProcessor.loadModel(DemucsProcessor::getDefaultModelName(), errorMessage);
 }
@@ -17,9 +18,9 @@ const juce::String JamPTAudioProcessor::getName() const
     return JucePlugin_Name;
 }
 
-bool JamPTAudioProcessor::acceptsMidi() const { return false; }
-bool JamPTAudioProcessor::producesMidi() const { return false; }
-bool JamPTAudioProcessor::isMidiEffect() const { return false; }
+bool JamPTAudioProcessor::acceptsMidi() const { return JucePlugin_WantsMidiInput; }
+bool JamPTAudioProcessor::producesMidi() const { return JucePlugin_ProducesMidiOutput; }
+bool JamPTAudioProcessor::isMidiEffect() const { return JucePlugin_IsMidiEffect; }
 double JamPTAudioProcessor::getTailLengthSeconds() const { return 0.0; }
 
 int JamPTAudioProcessor::getNumPrograms() { return 1; }
@@ -54,8 +55,9 @@ void JamPTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
     juce::ignoreUnused(midiMessages);
     juce::ScopedNoDenormals noDenormals;
     syncStemGainsFromParameters();
+    syncStemTogglesFromParameters();
     refreshBackendStateFromLoadedFile();
-    processMarkerActionParameters();
+    processControlActionParameters();
 
     buffer.clear();
 
@@ -155,6 +157,7 @@ void JamPTAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
         valueTreeState.replaceState(parameterState);
 
     syncStemGainsFromParameters();
+    syncStemTogglesFromParameters();
     setStemSolo(DemucsProcessor::Stem::vocals, static_cast<bool>(state.getProperty("vocalsSolo", false)));
     setStemSolo(DemucsProcessor::Stem::drums, static_cast<bool>(state.getProperty("drumsSolo", false)));
     setStemSolo(DemucsProcessor::Stem::bass, static_cast<bool>(state.getProperty("bassSolo", false)));
@@ -267,6 +270,9 @@ float JamPTAudioProcessor::getStemGain(DemucsProcessor::Stem stem) const
 
 void JamPTAudioProcessor::setStemSolo(DemucsProcessor::Stem stem, bool shouldSolo)
 {
+    if (auto* parameter = valueTreeState.getParameter(getStemToggleParameterId(stem, "solo")))
+        parameter->setValueNotifyingHost(shouldSolo ? 1.0f : 0.0f);
+
     demucsProcessor.setStemSolo(stem, shouldSolo);
 }
 
@@ -277,6 +283,9 @@ bool JamPTAudioProcessor::isStemSolo(DemucsProcessor::Stem stem) const
 
 void JamPTAudioProcessor::setStemMute(DemucsProcessor::Stem stem, bool shouldMute)
 {
+    if (auto* parameter = valueTreeState.getParameter(getStemToggleParameterId(stem, "mute")))
+        parameter->setValueNotifyingHost(shouldMute ? 1.0f : 0.0f);
+
     demucsProcessor.setStemMute(stem, shouldMute);
 }
 
@@ -494,6 +503,13 @@ JamPTAudioProcessor::APVTS::ParameterLayout JamPTAudioProcessor::createParameter
     addStemParameter(getStemParameterId(DemucsProcessor::Stem::drums), "Drums");
     addStemParameter(getStemParameterId(DemucsProcessor::Stem::bass), "Bass");
     addStemParameter(getStemParameterId(DemucsProcessor::Stem::other), "Other");
+
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getControlActionParameterId("play_pause"), 1),
+                                                          "Play/Pause",
+                                                          false));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getControlActionParameterId("stop"), 1),
+                                                          "Stop",
+                                                          false));
     layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getMarkerActionParameterId("prev"), 1),
                                                           "Previous Marker",
                                                           false));
@@ -503,6 +519,22 @@ JamPTAudioProcessor::APVTS::ParameterLayout JamPTAudioProcessor::createParameter
     layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getMarkerActionParameterId("next"), 1),
                                                           "Next Marker",
                                                           false));
+
+    const auto addStemToggleParameters = [&layout](DemucsProcessor::Stem stem, const juce::String& stemName)
+    {
+        layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getStemToggleParameterId(stem, "solo"), 1),
+                                                              stemName + " Solo",
+                                                              false));
+        layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getStemToggleParameterId(stem, "mute"), 1),
+                                                              stemName + " Mute",
+                                                              false));
+    };
+
+    addStemToggleParameters(DemucsProcessor::Stem::vocals, "Vocals");
+    addStemToggleParameters(DemucsProcessor::Stem::drums, "Drums");
+    addStemToggleParameters(DemucsProcessor::Stem::bass, "Bass");
+    addStemToggleParameters(DemucsProcessor::Stem::other, "Other");
+
     return layout;
 }
 
@@ -521,6 +553,26 @@ juce::String JamPTAudioProcessor::getStemParameterId(DemucsProcessor::Stem stem)
     return {};
 }
 
+juce::String JamPTAudioProcessor::getStemToggleParameterId(DemucsProcessor::Stem stem, const juce::String& toggleKind)
+{
+    switch (stem)
+    {
+        case DemucsProcessor::Stem::vocals: return "vocals_" + toggleKind;
+        case DemucsProcessor::Stem::drums: return "drums_" + toggleKind;
+        case DemucsProcessor::Stem::bass: return "bass_" + toggleKind;
+        case DemucsProcessor::Stem::other: return "other_" + toggleKind;
+        case DemucsProcessor::Stem::count: break;
+    }
+
+    jassertfalse;
+    return {};
+}
+
+juce::String JamPTAudioProcessor::getControlActionParameterId(const juce::String& actionName)
+{
+    return "control_" + actionName;
+}
+
 juce::String JamPTAudioProcessor::getMarkerActionParameterId(const juce::String& actionName)
 {
     return "marker_" + actionName;
@@ -534,11 +586,35 @@ void JamPTAudioProcessor::syncStemGainsFromParameters()
     applyStemGainFromParameter(DemucsProcessor::Stem::other);
 }
 
-void JamPTAudioProcessor::processMarkerActionParameters()
+void JamPTAudioProcessor::syncStemTogglesFromParameters()
 {
-    auto handleMarkerAction = [this](const juce::String& parameterId,
-                                     bool& previousPressedState,
-                                     const std::function<void()>& action)
+    const auto applyStemToggle = [this](DemucsProcessor::Stem stem, const juce::String& toggleKind)
+    {
+        if (auto* rawValue = valueTreeState.getRawParameterValue(getStemToggleParameterId(stem, toggleKind)))
+        {
+            const auto shouldEnable = rawValue->load() >= 0.5f;
+            if (toggleKind == "solo")
+                demucsProcessor.setStemSolo(stem, shouldEnable);
+            else if (toggleKind == "mute")
+                demucsProcessor.setStemMute(stem, shouldEnable);
+        }
+    };
+
+    for (const auto stem : { DemucsProcessor::Stem::vocals,
+                             DemucsProcessor::Stem::drums,
+                             DemucsProcessor::Stem::bass,
+                             DemucsProcessor::Stem::other })
+    {
+        applyStemToggle(stem, "solo");
+        applyStemToggle(stem, "mute");
+    }
+}
+
+void JamPTAudioProcessor::processControlActionParameters()
+{
+    auto handleMomentaryAction = [this](const juce::String& parameterId,
+                                        bool& previousPressedState,
+                                        const std::function<void()>& action)
     {
         auto* rawValue = valueTreeState.getRawParameterValue(parameterId);
         if (rawValue == nullptr)
@@ -551,21 +627,35 @@ void JamPTAudioProcessor::processMarkerActionParameters()
         previousPressedState = isPressed;
     };
 
-    handleMarkerAction(getMarkerActionParameterId("prev"),
-                       previousMarkerActionPressed,
-                       [this]() { jumpToPreviousMarker(); });
-    handleMarkerAction(getMarkerActionParameterId("toggle"),
-                       toggleMarkerActionPressed,
-                       [this]()
-                       {
-                           if (isAtMarker())
-                               removeMarkerAtCurrentPosition();
-                           else
-                               addMarkerAtCurrentPosition();
-                       });
-    handleMarkerAction(getMarkerActionParameterId("next"),
-                       nextMarkerActionPressed,
-                       [this]() { jumpToNextMarker(); });
+    handleMomentaryAction(getControlActionParameterId("play_pause"),
+                          playPauseActionPressed,
+                          [this]()
+                          {
+                              if (getPlaybackState() == AudioFilePlayer::PlaybackState::playing)
+                                  pausePlayback();
+                              else
+                                  startPlayback();
+                          });
+
+    handleMomentaryAction(getControlActionParameterId("stop"),
+                          stopActionPressed,
+                          [this]() { stopPlayback(); });
+
+    handleMomentaryAction(getMarkerActionParameterId("prev"),
+                          previousMarkerActionPressed,
+                          [this]() { jumpToPreviousMarker(); });
+    handleMomentaryAction(getMarkerActionParameterId("toggle"),
+                          toggleMarkerActionPressed,
+                          [this]()
+                          {
+                              if (isAtMarker())
+                                  removeMarkerAtCurrentPosition();
+                              else
+                                  addMarkerAtCurrentPosition();
+                          });
+    handleMomentaryAction(getMarkerActionParameterId("next"),
+                          nextMarkerActionPressed,
+                          [this]() { jumpToNextMarker(); });
 }
 
 void JamPTAudioProcessor::applyStemGainFromParameter(DemucsProcessor::Stem stem)
