@@ -1,10 +1,14 @@
 #pragma once
 
+#include <atomic>
+
 #include <JuceHeader.h>
 #include "AudioFilePlayer.h"
 #include "DemucsProcessor.h"
 
-class JamPTAudioProcessor final : public juce::AudioProcessor
+class JamPTAudioProcessor final : public juce::AudioProcessor,
+                                  private juce::AudioProcessorValueTreeState::Listener,
+                                  private juce::AsyncUpdater
 {
 public:
     using APVTS = juce::AudioProcessorValueTreeState;
@@ -86,11 +90,25 @@ public:
     void refreshBackendStateFromLoadedFile();
 
 private:
+    enum PendingActionFlags
+    {
+        noPendingAction = 0,
+        playPausePending = 1 << 0,
+        stopPending = 1 << 1,
+        previousMarkerPending = 1 << 2,
+        addMarkerPending = 1 << 3,
+        removeMarkerPending = 1 << 4,
+        nextMarkerPending = 1 << 5
+    };
+
     static constexpr float momentaryActionThreshold = 0.5f;
+    void parameterChanged(const juce::String& parameterID, float newValue) override;
+    void handleAsyncUpdate() override;
+    void queuePendingAction(int actionFlag);
+    void resetMomentaryParameter(const juce::String& parameterID);
     void syncStemGainsFromParameters();
     void syncStemTogglesFromParameters();
     void applyStemGainFromParameter(DemucsProcessor::Stem stem);
-    void processControlActionParameters();
     struct PendingPlaybackRestore
     {
         juce::File audioFile;
@@ -106,13 +124,15 @@ private:
     DemucsProcessor demucsProcessor;
     APVTS valueTreeState;
     PendingPlaybackRestore pendingPlaybackRestore;
+    std::atomic<int> pendingActionFlags { noPendingAction };
     bool hasPreparedPlayback { false };
-    bool playPauseActionPressed { false };
-    bool stopActionPressed { false };
-    bool previousMarkerActionPressed { false };
-    bool addMarkerActionPressed { false };
-    bool removeMarkerActionPressed { false };
-    bool nextMarkerActionPressed { false };
+    bool shouldResetPositionOnNextBlock { false };
+    std::atomic<bool> playPauseActionPressed { false };
+    std::atomic<bool> stopActionPressed { false };
+    std::atomic<bool> previousMarkerActionPressed { false };
+    std::atomic<bool> addMarkerActionPressed { false };
+    std::atomic<bool> removeMarkerActionPressed { false };
+    std::atomic<bool> nextMarkerActionPressed { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(JamPTAudioProcessor)
 };

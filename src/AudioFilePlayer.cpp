@@ -90,7 +90,7 @@ bool AudioFilePlayer::play()
 
 bool AudioFilePlayer::pause()
 {
-    if (! isLoaded() || playbackState != PlaybackState::playing)
+    if (! isLoaded() || getPlaybackState() != PlaybackState::playing)
         return false;
 
     transport.stop();
@@ -123,7 +123,16 @@ juce::File AudioFilePlayer::getLoadedFile() const
 
 AudioFilePlayer::PlaybackState AudioFilePlayer::getPlaybackState() const
 {
-    return playbackState;
+    if (! isLoaded())
+        return PlaybackState::stopped;
+
+    if (transport.isPlaying())
+        return PlaybackState::playing;
+
+    if (transport.getCurrentPosition() <= 0.0)
+        return PlaybackState::stopped;
+
+    return PlaybackState::paused;
 }
 
 double AudioFilePlayer::getCurrentPositionSeconds() const

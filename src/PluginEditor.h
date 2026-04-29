@@ -85,6 +85,7 @@ private:
     JamPTAudioProcessor::APVTS& valueTreeState;
     std::unique_ptr<juce::FileChooser> activeFileChooser;
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
+    using ButtonAttachment = juce::AudioProcessorValueTreeState::ButtonAttachment;
     StemKnobLookAndFeel stemKnobLookAndFeel;
     CacheSelectorLookAndFeel cacheSelectorLookAndFeel;
     juce::StringArray lastCacheEntries;
@@ -120,10 +121,23 @@ private:
     juce::Slider otherSlider;
     WaveformScrubber waveformScrubber;
     juce::Label footerLabel;
+    juce::Label buildLabel;
     std::unique_ptr<SliderAttachment> vocalsAttachment;
     std::unique_ptr<SliderAttachment> drumsAttachment;
     std::unique_ptr<SliderAttachment> bassAttachment;
     std::unique_ptr<SliderAttachment> otherAttachment;
+    std::unique_ptr<ButtonAttachment> prevAttachment;
+    std::unique_ptr<ButtonAttachment> playbackAttachment;
+    std::unique_ptr<ButtonAttachment> stopAttachment;
+    std::unique_ptr<ButtonAttachment> nextAttachment;
+    std::unique_ptr<ButtonAttachment> vocalsSoloAttachment;
+    std::unique_ptr<ButtonAttachment> vocalsMuteAttachment;
+    std::unique_ptr<ButtonAttachment> drumsSoloAttachment;
+    std::unique_ptr<ButtonAttachment> drumsMuteAttachment;
+    std::unique_ptr<ButtonAttachment> bassSoloAttachment;
+    std::unique_ptr<ButtonAttachment> bassMuteAttachment;
+    std::unique_ptr<ButtonAttachment> otherSoloAttachment;
+    std::unique_ptr<ButtonAttachment> otherMuteAttachment;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(JamPTAudioProcessorEditor)
 };

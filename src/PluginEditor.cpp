@@ -1,5 +1,18 @@
 #include "PluginEditor.h"
 
+namespace
+{
+juce::String getBuildStamp()
+{
+    return "Build "
+         + juce::String(ProjectInfo::versionString)
+         + "  "
+         + juce::String(__DATE__)
+         + " "
+         + juce::String(__TIME__);
+}
+}
+
 void StemKnobLookAndFeel::drawRotarySlider(juce::Graphics& g,
                                            int x,
                                            int y,
@@ -269,14 +282,19 @@ JamPTAudioProcessorEditor::JamPTAudioProcessorEditor(JamPTAudioProcessor& p)
     openCacheFolderButton.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(52, 56, 62));
 
     prevButton.addListener(this);
+    prevButton.setClickingTogglesState(true);
     prevButton.setEnabled(false);
     addAndMakeVisible(prevButton);
     prevButton.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(52, 56, 62));
+    prevButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour::fromRGB(52, 56, 62));
 
     playbackButton.addListener(this);
+    playbackButton.setClickingTogglesState(true);
     addAndMakeVisible(playbackButton);
     playbackButton.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(64, 140, 110));
+    playbackButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour::fromRGB(64, 140, 110));
     playbackButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    playbackButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
 
     plusButton.addListener(this);
     plusButton.setEnabled(false);
@@ -286,9 +304,11 @@ JamPTAudioProcessorEditor::JamPTAudioProcessorEditor(JamPTAudioProcessor& p)
     auto configureStemStateButton = [this](juce::TextButton& button)
     {
         button.addListener(this);
-        button.setClickingTogglesState(false);
+        button.setClickingTogglesState(true);
         button.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(52, 56, 62));
+        button.setColour(juce::TextButton::buttonOnColourId, juce::Colour::fromRGB(52, 56, 62));
         button.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        button.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
         addAndMakeVisible(button);
     };
 
@@ -302,14 +322,19 @@ JamPTAudioProcessorEditor::JamPTAudioProcessorEditor(JamPTAudioProcessor& p)
     configureStemStateButton(otherMuteButton);
 
     stopButton.addListener(this);
+    stopButton.setClickingTogglesState(true);
     addAndMakeVisible(stopButton);
     stopButton.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(146, 72, 72));
+    stopButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour::fromRGB(146, 72, 72));
     stopButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    stopButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
 
     nextButton.addListener(this);
+    nextButton.setClickingTogglesState(true);
     nextButton.setEnabled(false);
     addAndMakeVisible(nextButton);
     nextButton.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(52, 56, 62));
+    nextButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour::fromRGB(52, 56, 62));
 
     openModelButton.setButtonText("Select Demucs model");
     openModelButton.addListener(this);
@@ -318,6 +343,10 @@ JamPTAudioProcessorEditor::JamPTAudioProcessorEditor(JamPTAudioProcessor& p)
     positionLabel.setJustificationType(juce::Justification::centredLeft);
     durationLabel.setJustificationType(juce::Justification::centredRight);
     footerLabel.setJustificationType(juce::Justification::centred);
+    buildLabel.setJustificationType(juce::Justification::centredRight);
+    buildLabel.setFont(juce::FontOptions(11.0f));
+    buildLabel.setAlpha(0.82f);
+    buildLabel.setText(getBuildStamp(), juce::dontSendNotification);
 
     footerLabel.setText("Offline Demucs CLI separation with cached stems in Application Support", juce::dontSendNotification);
 
@@ -338,6 +367,43 @@ JamPTAudioProcessorEditor::JamPTAudioProcessorEditor(JamPTAudioProcessor& p)
     otherAttachment = std::make_unique<SliderAttachment>(valueTreeState,
                                                          JamPTAudioProcessor::getStemParameterId(DemucsProcessor::Stem::other),
                                                          otherSlider);
+    prevAttachment = std::make_unique<ButtonAttachment>(valueTreeState,
+                                                        JamPTAudioProcessor::getMarkerActionParameterId("prev"),
+                                                        prevButton);
+    playbackAttachment = std::make_unique<ButtonAttachment>(valueTreeState,
+                                                            JamPTAudioProcessor::getControlActionParameterId("play_pause"),
+                                                            playbackButton);
+    stopAttachment = std::make_unique<ButtonAttachment>(valueTreeState,
+                                                        JamPTAudioProcessor::getControlActionParameterId("stop"),
+                                                        stopButton);
+    nextAttachment = std::make_unique<ButtonAttachment>(valueTreeState,
+                                                        JamPTAudioProcessor::getMarkerActionParameterId("next"),
+                                                        nextButton);
+
+    vocalsSoloAttachment = std::make_unique<ButtonAttachment>(valueTreeState,
+                                                              JamPTAudioProcessor::getStemToggleParameterId(DemucsProcessor::Stem::vocals, "solo"),
+                                                              vocalsSoloButton);
+    vocalsMuteAttachment = std::make_unique<ButtonAttachment>(valueTreeState,
+                                                              JamPTAudioProcessor::getStemToggleParameterId(DemucsProcessor::Stem::vocals, "mute"),
+                                                              vocalsMuteButton);
+    drumsSoloAttachment = std::make_unique<ButtonAttachment>(valueTreeState,
+                                                             JamPTAudioProcessor::getStemToggleParameterId(DemucsProcessor::Stem::drums, "solo"),
+                                                             drumsSoloButton);
+    drumsMuteAttachment = std::make_unique<ButtonAttachment>(valueTreeState,
+                                                             JamPTAudioProcessor::getStemToggleParameterId(DemucsProcessor::Stem::drums, "mute"),
+                                                             drumsMuteButton);
+    bassSoloAttachment = std::make_unique<ButtonAttachment>(valueTreeState,
+                                                            JamPTAudioProcessor::getStemToggleParameterId(DemucsProcessor::Stem::bass, "solo"),
+                                                            bassSoloButton);
+    bassMuteAttachment = std::make_unique<ButtonAttachment>(valueTreeState,
+                                                            JamPTAudioProcessor::getStemToggleParameterId(DemucsProcessor::Stem::bass, "mute"),
+                                                            bassMuteButton);
+    otherSoloAttachment = std::make_unique<ButtonAttachment>(valueTreeState,
+                                                             JamPTAudioProcessor::getStemToggleParameterId(DemucsProcessor::Stem::other, "solo"),
+                                                             otherSoloButton);
+    otherMuteAttachment = std::make_unique<ButtonAttachment>(valueTreeState,
+                                                             JamPTAudioProcessor::getStemToggleParameterId(DemucsProcessor::Stem::other, "mute"),
+                                                             otherMuteButton);
 
     addAndMakeVisible(positionLabel);
     addAndMakeVisible(durationLabel);
@@ -351,6 +417,7 @@ JamPTAudioProcessorEditor::JamPTAudioProcessorEditor(JamPTAudioProcessor& p)
     addAndMakeVisible(otherSlider);
     addAndMakeVisible(waveformScrubber);
     addAndMakeVisible(footerLabel);
+    addAndMakeVisible(buildLabel);
 
     waveformScrubber.onSeek = [this](double positionSeconds)
     {
@@ -374,6 +441,18 @@ JamPTAudioProcessorEditor::~JamPTAudioProcessorEditor()
     drumsAttachment.reset();
     bassAttachment.reset();
     otherAttachment.reset();
+    prevAttachment.reset();
+    playbackAttachment.reset();
+    stopAttachment.reset();
+    nextAttachment.reset();
+    vocalsSoloAttachment.reset();
+    vocalsMuteAttachment.reset();
+    drumsSoloAttachment.reset();
+    drumsMuteAttachment.reset();
+    bassSoloAttachment.reset();
+    bassMuteAttachment.reset();
+    otherSoloAttachment.reset();
+    otherMuteAttachment.reset();
     waveformScrubber.onSeek = nullptr;
 
     vocalsSlider.setLookAndFeel(nullptr);
@@ -432,7 +511,11 @@ void JamPTAudioProcessorEditor::resized()
     row1.removeFromRight(10);
     cachedAudioComboBox.setBounds(row1);
 
-    area.removeFromTop(12);
+    area.removeFromTop(6);
+    auto buildRow = area.removeFromTop(16);
+    buildLabel.setBounds(buildRow.removeFromRight(260));
+
+    area.removeFromTop(10);
     auto row2 = area.removeFromTop(30);
     playbackButton.setBounds(row2.removeFromLeft(120));
     row2.removeFromLeft(12);
@@ -522,17 +605,22 @@ void JamPTAudioProcessorEditor::buttonClicked(juce::Button* button)
         if (selectedCacheDirectory.isDirectory())
             selectedCacheDirectory.revealToUser();
     }
-    else if (button == &prevButton || button == &plusButton || button == &nextButton)
+    else if (button == &prevButton)
     {
-        if (button == &prevButton)
-            audioProcessor.jumpToPreviousMarker();
-        else if (button == &nextButton)
-            audioProcessor.jumpToNextMarker();
-        else if (audioProcessor.isAtMarker())
-            audioProcessor.removeMarkerAtCurrentPosition();
-        else
-            audioProcessor.addMarkerAtCurrentPosition();
-
+        refreshLabels();
+    }
+    else if (button == &plusButton)
+    {
+        // Toggle between add and remove based on current position
+        const auto parameterId = audioProcessor.isAtMarker()
+                                   ? JamPTAudioProcessor::getMarkerActionParameterId("remove")
+                                   : JamPTAudioProcessor::getMarkerActionParameterId("add");
+        if (auto* parameter = valueTreeState.getParameter(parameterId))
+            parameter->setValueNotifyingHost(1.0f);
+        refreshLabels();
+    }
+    else if (button == &nextButton)
+    {
         refreshLabels();
     }
     else if (button == &vocalsSoloButton || button == &vocalsMuteButton
@@ -540,27 +628,15 @@ void JamPTAudioProcessorEditor::buttonClicked(juce::Button* button)
           || button == &bassSoloButton || button == &bassMuteButton
           || button == &otherSoloButton || button == &otherMuteButton)
     {
-        auto applyStemStateToggle = [this, button](DemucsProcessor::Stem stem, juce::TextButton& soloButton, juce::TextButton& muteButton)
-        {
-            if (button == &soloButton)
-                audioProcessor.setStemSolo(stem, ! audioProcessor.isStemSolo(stem));
-            else if (button == &muteButton)
-                audioProcessor.setStemMute(stem, ! audioProcessor.isStemMuted(stem));
-        };
-
-        applyStemStateToggle(DemucsProcessor::Stem::vocals, vocalsSoloButton, vocalsMuteButton);
-        applyStemStateToggle(DemucsProcessor::Stem::drums, drumsSoloButton, drumsMuteButton);
-        applyStemStateToggle(DemucsProcessor::Stem::bass, bassSoloButton, bassMuteButton);
-        applyStemStateToggle(DemucsProcessor::Stem::other, otherSoloButton, otherMuteButton);
         refreshLabels();
     }
     else if (button == &playbackButton)
     {
-        handlePlaybackButton();
+        refreshLabels();
     }
     else if (button == &stopButton)
     {
-        handleStopButton();
+        refreshLabels();
     }
     else if (button == &openModelButton)
     {
@@ -665,10 +741,13 @@ void JamPTAudioProcessorEditor::refreshLabels()
     otherSlider.setAlpha(enabledAlpha);
     auto updateStemStateButton = [enabledAlpha, stemsReady](juce::TextButton& button, bool active, juce::Colour activeColour)
     {
+        juce::ignoreUnused(active);
         button.setEnabled(stemsReady);
         button.setAlpha(enabledAlpha);
-        button.setColour(juce::TextButton::buttonColourId, active ? activeColour : juce::Colour::fromRGB(52, 56, 62));
+        button.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(52, 56, 62));
+        button.setColour(juce::TextButton::buttonOnColourId, activeColour);
         button.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        button.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
     };
 
     updateStemStateButton(vocalsSoloButton, audioProcessor.isStemSolo(DemucsProcessor::Stem::vocals), juce::Colour::fromRGB(220, 190, 64));
@@ -728,24 +807,11 @@ void JamPTAudioProcessorEditor::refreshCachedAudioSelector()
 
 void JamPTAudioProcessorEditor::handlePlaybackButton()
 {
-    const auto playbackState = audioProcessor.getPlaybackState();
-    const bool success = playbackState == AudioFilePlayer::PlaybackState::playing
-                           ? audioProcessor.pausePlayback()
-                           : audioProcessor.startPlayback();
-
-    if (! success)
-        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
-                                               "Jam-PT",
-                                               audioProcessor.hasSeparationFailed()
-                                                   ? "Stem separation failed. Load another model or audio file and try again."
-                                                   : "Wait for stem separation to complete before using playback controls.");
-
     refreshLabels();
 }
 
 void JamPTAudioProcessorEditor::handleStopButton()
 {
-    audioProcessor.stopPlayback();
     refreshLabels();
 }
 

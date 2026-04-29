@@ -1331,10 +1331,11 @@ bool DemucsProcessor::convertStemToCacheFormat(const juce::File& sourceStemFile,
     }
 
     juce::FlacAudioFormat flacFormat;
+    const int bitsPerSample = static_cast<int>(reader->bitsPerSample > 0 ? reader->bitsPerSample : 24);
     std::unique_ptr<juce::AudioFormatWriter> writer(flacFormat.createWriterFor(outputStream.get(),
                                                                                reader->sampleRate,
                                                                                static_cast<unsigned int>(reader->numChannels),
-                                                                               static_cast<unsigned int>(reader->bitsPerSample > 0 ? reader->bitsPerSample : 24),
+                                                                               bitsPerSample,
                                                                                {},
                                                                                0));
     if (writer == nullptr)

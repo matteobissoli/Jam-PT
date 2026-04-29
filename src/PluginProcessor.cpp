@@ -10,13 +10,28 @@ JamPTAudioProcessor::JamPTAudioProcessor()
     : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       valueTreeState(*this, nullptr, "Parameters", createParameterLayout())
 {
+    valueTreeState.addParameterListener(getControlActionParameterId("play_pause"), this);
+    valueTreeState.addParameterListener(getControlActionParameterId("stop"), this);
+    valueTreeState.addParameterListener(getMarkerActionParameterId("prev"), this);
+    valueTreeState.addParameterListener(getMarkerActionParameterId("add"), this);
+    valueTreeState.addParameterListener(getMarkerActionParameterId("remove"), this);
+    valueTreeState.addParameterListener(getMarkerActionParameterId("next"), this);
     syncStemGainsFromParameters();
     syncStemTogglesFromParameters();
     juce::String errorMessage;
     demucsProcessor.loadModel(DemucsProcessor::getDefaultModelName(), errorMessage);
 }
 
-JamPTAudioProcessor::~JamPTAudioProcessor() = default;
+JamPTAudioProcessor::~JamPTAudioProcessor()
+{
+    cancelPendingUpdate();
+    valueTreeState.removeParameterListener(getControlActionParameterId("play_pause"), this);
+    valueTreeState.removeParameterListener(getControlActionParameterId("stop"), this);
+    valueTreeState.removeParameterListener(getMarkerActionParameterId("prev"), this);
+    valueTreeState.removeParameterListener(getMarkerActionParameterId("add"), this);
+    valueTreeState.removeParameterListener(getMarkerActionParameterId("remove"), this);
+    valueTreeState.removeParameterListener(getMarkerActionParameterId("next"), this);
+}
 
 const juce::String JamPTAudioProcessor::getName() const
 {
@@ -62,9 +77,15 @@ void JamPTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
     syncStemGainsFromParameters();
     syncStemTogglesFromParameters();
     refreshBackendStateFromLoadedFile();
-    processControlActionParameters();
 
     buffer.clear();
+
+    // Reset position after stop was processed
+    if (shouldResetPositionOnNextBlock && player.getPlaybackState() != AudioFilePlayer::PlaybackState::playing)
+    {
+        demucsProcessor.seekTo(0.0, false);
+        shouldResetPositionOnNextBlock = false;
+    }
 
     if (player.getPlaybackState() != AudioFilePlayer::PlaybackState::playing)
         return;
@@ -220,13 +241,21 @@ bool JamPTAudioProcessor::startPlayback()
 
 bool JamPTAudioProcessor::pausePlayback()
 {
-    return player.pause();
+    const auto paused = player.pause();
+    if (paused)
+    {
+        demucsProcessor.seekTo(player.getCurrentPositionSeconds(), false);
+        shouldResetPositionOnNextBlock = false;
+    }
+
+    return paused;
 }
 
 void JamPTAudioProcessor::stopPlayback()
 {
     player.stop();
     demucsProcessor.seekTo(0.0, false);
+    shouldResetPositionOnNextBlock = false;
 }
 
 void JamPTAudioProcessor::setPlaybackPositionSeconds(double seconds)
@@ -521,21 +550,9 @@ JamPTAudioProcessor::APVTS::ParameterLayout JamPTAudioProcessor::createParameter
 
     auto addMomentaryActionParameter = [&layout](const juce::String& id, const juce::String& name)
     {
-        auto attributes = juce::AudioParameterFloatAttributes()
-                            .withStringFromValueFunction([](float value, int)
-                            {
-                                return value >= momentaryActionThreshold ? "Trigger" : "Idle";
-                            })
-                            .withValueFromStringFunction([](const juce::String& text)
-                            {
-                                return text.equalsIgnoreCase("Trigger") ? 1.0f : 0.0f;
-                            });
-
-        layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID(id, 1),
-                                                               name,
-                                                               juce::NormalisableRange<float>(0.0f, 1.0f, 1.0f),
-                                                               0.0f,
-                                                               attributes));
+        layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(id, 1),
+                                                              name,
+                                                              false));
     };
 
     addStemParameter(getStemParameterId(DemucsProcessor::Stem::vocals), "Vocals");
@@ -642,62 +659,115 @@ void JamPTAudioProcessor::syncStemTogglesFromParameters()
     }
 }
 
-void JamPTAudioProcessor::processControlActionParameters()
+void JamPTAudioProcessor::parameterChanged(const juce::String& parameterID, float newValue)
 {
-    auto handleMomentaryAction = [this](const juce::String& parameterId,
-                                        bool& previousPressedState,
-                                        const std::function<void()>& action)
+    const auto isPressed = newValue >= momentaryActionThreshold;
+
+    auto handleToggleAction = [this, &parameterID, isPressed](const juce::String& expectedParameterId,
+                                                              std::atomic<bool>& previousPressedState,
+                                                              int actionFlag)
     {
-        auto* rawValue = valueTreeState.getRawParameterValue(parameterId);
-        if (rawValue == nullptr)
-            return;
+        if (parameterID != expectedParameterId)
+            return false;
 
-        const auto isPressed = rawValue->load() >= momentaryActionThreshold;
-        if (isPressed && ! previousPressedState)
-        {
-            action();
-            if (auto* parameter = valueTreeState.getParameter(parameterId))
-                parameter->setValueNotifyingHost(0.0f);
+        const auto previousState = previousPressedState.exchange(isPressed);
+        if (isPressed != previousState)
+            queuePendingAction(actionFlag);
 
-            previousPressedState = false;
-            return;
-        }
-
-        previousPressedState = isPressed;
+        return true;
     };
 
-    handleMomentaryAction(getControlActionParameterId("play_pause"),
-                          playPauseActionPressed,
-                          [this]()
-                          {
-                              if (getPlaybackState() == AudioFilePlayer::PlaybackState::playing)
-                                  pausePlayback();
-                              else
-                                  startPlayback();
-                          });
+    if (handleToggleAction(getControlActionParameterId("play_pause"), playPauseActionPressed, playPausePending))
+        return;
 
-    handleMomentaryAction(getControlActionParameterId("stop"),
-                          stopActionPressed,
-                          [this]() { stopPlayback(); });
+    if (handleToggleAction(getControlActionParameterId("stop"), stopActionPressed, stopPending))
+        return;
 
-    handleMomentaryAction(getMarkerActionParameterId("prev"),
-                          previousMarkerActionPressed,
-                          [this]() { jumpToPreviousMarker(); });
-    handleMomentaryAction(getMarkerActionParameterId("add"),
-                          addMarkerActionPressed,
-                          [this]() { addMarkerAtCurrentPosition(); });
-    handleMomentaryAction(getMarkerActionParameterId("remove"),
-                          removeMarkerActionPressed,
-                          [this]() { removeMarkerAtCurrentPosition(); });
-    handleMomentaryAction(getMarkerActionParameterId("next"),
-                          nextMarkerActionPressed,
-                          [this]() { jumpToNextMarker(); });
+    if (handleToggleAction(getMarkerActionParameterId("prev"), previousMarkerActionPressed, previousMarkerPending))
+        return;
+
+    if (handleToggleAction(getMarkerActionParameterId("next"), nextMarkerActionPressed, nextMarkerPending))
+        return;
+
+    auto handleMomentaryAction = [this, &parameterID, isPressed](const juce::String& expectedParameterId,
+                                                                 std::atomic<bool>& previousPressedState,
+                                                                 int actionFlag)
+    {
+        if (parameterID != expectedParameterId)
+            return false;
+
+        const auto previousState = previousPressedState.exchange(isPressed);
+        if (isPressed && ! previousState)
+            queuePendingAction(actionFlag);
+
+        return true;
+    };
+
+    if (handleMomentaryAction(getMarkerActionParameterId("add"), addMarkerActionPressed, addMarkerPending))
+        return;
+
+    handleMomentaryAction(getMarkerActionParameterId("remove"), removeMarkerActionPressed, removeMarkerPending);
 }
 
 void JamPTAudioProcessor::applyStemGainFromParameter(DemucsProcessor::Stem stem)
 {
     if (auto* rawValue = valueTreeState.getRawParameterValue(getStemParameterId(stem)))
         demucsProcessor.setStemGain(stem, rawValue->load());
+}
+
+void JamPTAudioProcessor::handleAsyncUpdate()
+{
+    const auto flags = pendingActionFlags.exchange(noPendingAction);
+
+    if ((flags & playPausePending) != 0)
+    {
+        if (getPlaybackState() == AudioFilePlayer::PlaybackState::playing)
+            pausePlayback();
+        else
+            startPlayback();
+    }
+
+    if ((flags & stopPending) != 0)
+    {
+        stopPlayback();
+        resetMomentaryParameter(getControlActionParameterId("stop"));
+    }
+
+    if ((flags & previousMarkerPending) != 0)
+    {
+        jumpToPreviousMarker();
+        resetMomentaryParameter(getMarkerActionParameterId("prev"));
+    }
+
+    if ((flags & addMarkerPending) != 0)
+    {
+        addMarkerAtCurrentPosition();
+        resetMomentaryParameter(getMarkerActionParameterId("add"));
+    }
+
+    if ((flags & removeMarkerPending) != 0)
+    {
+        removeMarkerAtCurrentPosition();
+        resetMomentaryParameter(getMarkerActionParameterId("remove"));
+    }
+
+    if ((flags & nextMarkerPending) != 0)
+    {
+        jumpToNextMarker();
+        resetMomentaryParameter(getMarkerActionParameterId("next"));
+    }
+}
+
+void JamPTAudioProcessor::queuePendingAction(int actionFlag)
+{
+    pendingActionFlags.fetch_or(actionFlag);
+    triggerAsyncUpdate();
+}
+
+void JamPTAudioProcessor::resetMomentaryParameter(const juce::String& parameterID)
+{
+    if (auto* parameter = valueTreeState.getParameter(parameterID))
+        parameter->setValueNotifyingHost(0.0f);
 }
 
 void JamPTAudioProcessor::applyPendingPlaybackRestore()
