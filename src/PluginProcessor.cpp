@@ -251,6 +251,12 @@ bool JamPTAudioProcessor::pausePlayback()
     return paused;
 }
 
+void JamPTAudioProcessor::rewindPlayback()
+{
+    setPlaybackPositionSeconds(0.0);
+    shouldResetPositionOnNextBlock = false;
+}
+
 void JamPTAudioProcessor::stopPlayback()
 {
     player.stop();
@@ -563,7 +569,7 @@ JamPTAudioProcessor::APVTS::ParameterLayout JamPTAudioProcessor::createParameter
     layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(getControlActionParameterId("play_pause"), 1),
                                                           "Play/Pause",
                                                           false));
-    addMomentaryActionParameter(getControlActionParameterId("stop"), "Stop");
+    addMomentaryActionParameter(getControlActionParameterId("stop"), "Rewind");
     addMomentaryActionParameter(getMarkerActionParameterId("prev"), "Previous Marker");
     addMomentaryActionParameter(getMarkerActionParameterId("add"), "Add Marker");
     addMomentaryActionParameter(getMarkerActionParameterId("remove"), "Remove Marker");
@@ -729,7 +735,7 @@ void JamPTAudioProcessor::handleAsyncUpdate()
 
     if ((flags & stopPending) != 0)
     {
-        stopPlayback();
+        rewindPlayback();
         resetMomentaryParameter(getControlActionParameterId("stop"));
     }
 

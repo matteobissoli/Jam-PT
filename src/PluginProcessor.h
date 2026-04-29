@@ -42,6 +42,7 @@ public:
     bool loadAudioFile(const juce::File& file);
     bool startPlayback();
     bool pausePlayback();
+    void rewindPlayback();
     void stopPlayback();
     void setPlaybackPositionSeconds(double seconds);
     bool selectModel(const juce::String& modelName, juce::String& errorMessage);

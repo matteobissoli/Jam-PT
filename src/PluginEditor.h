@@ -98,7 +98,7 @@ private:
     juce::TextButton prevButton { "Prev" };
     juce::TextButton playbackButton { "PLAY" };
     juce::TextButton plusButton { "+" };
-    juce::TextButton stopButton { "STOP" };
+    juce::TextButton stopButton { "REWIND" };
     juce::TextButton nextButton { "Next" };
     juce::TextButton openModelButton { "Select Demucs model" };
     juce::Label positionLabel;
