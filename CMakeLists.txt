@@ -8,9 +8,12 @@ set(CMAKE_OBJCXX_STANDARD 17)
 set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 set_property(GLOBAL PROPERTY USE_FOLDERS YES)
 
+set(JAMPT_MACOS_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS deployment version for Jam-PT")
+set(JAMPT_MACOS_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS architectures to build for Jam-PT")
+
 if (APPLE)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS deployment version" FORCE)
-    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Build universal macOS binaries" FORCE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "${JAMPT_MACOS_DEPLOYMENT_TARGET}" CACHE STRING "Minimum macOS deployment version" FORCE)
+    set(CMAKE_OSX_ARCHITECTURES "${JAMPT_MACOS_ARCHITECTURES}" CACHE STRING "Build macOS binaries for the requested architectures" FORCE)
 endif()
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
@@ -93,6 +96,7 @@ target_link_libraries(Jam-PT
 if (APPLE)
     set_target_properties(Jam-PT PROPERTIES
         XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC NO
+        XCODE_ATTRIBUTE_ONLY_ACTIVE_ARCH NO
         XCODE_ATTRIBUTE_OTHER_LIBTOOLFLAGS "-no_warning_for_no_symbols"
     )
 endif()

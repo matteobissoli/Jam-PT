@@ -26,6 +26,8 @@ The plugin does not embed Demucs, PyTorch, CoreML, or any model runtime internal
 - Audio Unit generator (`AU`, `augn`)
 - VST3
 - Standalone app
+- universal build support for both Apple silicon (`arm64`) and Intel (`x86_64`) Macs
+- intended host compatibility with MainStage 3.6.4, including Intel-based Macs, when the AU is built with an `x86_64` slice
 
 ## Code Layout
 
@@ -174,6 +176,9 @@ brew install python@3.12 ffmpeg
 
 `python@3.11` is also a good option. Avoid building your Demucs runtime around Python 3.14 unless you already know your local `torch`, `torchaudio`, and `torchcodec` versions are compatible.
 
+On Apple silicon, Homebrew typically lives under `/opt/homebrew`.
+On Intel Macs, Homebrew typically lives under `/usr/local`.
+
 2. Install `pipx` if needed:
 
 ```bash
@@ -199,6 +204,18 @@ If you use Python 3.11 instead:
 
 ```bash
 pipx install --python /opt/homebrew/bin/python3.11 demucs
+```
+
+Intel Homebrew examples:
+
+```bash
+pipx install --python /usr/local/bin/python3.12 demucs
+```
+
+or:
+
+```bash
+pipx install --python /usr/local/bin/python3.11 demucs
 ```
 
 5. Inject `torchcodec`:
@@ -275,6 +292,40 @@ cmake -S . -B build-xcode -G Xcode -DJAMPT_FETCH_JUCE=ON
 cmake --build build-xcode --config Debug --target Jam-PT
 ```
 
+### Intel and MainStage 3.6.4 notes
+
+The root `CMakeLists.txt` is set up to build a universal macOS binary by default:
+
+```bash
+-DJAMPT_MACOS_ARCHITECTURES="arm64;x86_64"
+```
+
+and to use a lower deployment target suitable for older Intel host setups:
+
+```bash
+-DJAMPT_MACOS_DEPLOYMENT_TARGET=11.0
+```
+
+If you want to build only the Intel slice for MainStage 3.6.4 on an Intel Mac, configure explicitly with:
+
+```bash
+cmake -S . -B build-intel -G Xcode \
+  -DJAMPT_FETCH_JUCE=ON \
+  -DJAMPT_MACOS_ARCHITECTURES=x86_64 \
+  -DJAMPT_MACOS_DEPLOYMENT_TARGET=11.0
+cmake --build build-intel --config Release --target Jam-PT
+```
+
+If you want to keep a universal build but configure it explicitly:
+
+```bash
+cmake -S . -B build-universal -G Xcode \
+  -DJAMPT_FETCH_JUCE=ON \
+  -DJAMPT_MACOS_ARCHITECTURES="arm64;x86_64" \
+  -DJAMPT_MACOS_DEPLOYMENT_TARGET=11.0
+cmake --build build-universal --config Release --target Jam-PT
+```
+
 To build the VST3 target explicitly:
 
 ```bash
@@ -315,6 +366,7 @@ If validation fails or the plugin is not listed, rebuild the `AU` target in `Rel
 - `VST3` is available for compatible hosts, but it is not tagged with an AU-style `generator` type
 - `Standalone` exists mainly for development and debugging
 - MainStage should see the AU as a generator, not as an insert FX
+- in the current transport mapping, `Play/Pause` is a toggle, while `Rewind`, `Previous Marker`, and `Next Marker` are exposed as temporary trigger-style controls
 - the `generator` classification is specific to the `AU` build via `AU_MAIN_TYPE`; it does not carry over to `VST3`
 - the plugin falls back to playing the cached source file until separated stems are ready
 - once stems exist in cache for the selected source and model, Jam-PT reuses them automatically
@@ -327,6 +379,7 @@ If validation fails or the plugin is not listed, rebuild the `AU` target in `Rel
 - the plugin depends on an external Demucs runtime with compatible Python, FFmpeg, and TorchCodec
 - only the stems produced by the selected Demucs model are reused
 - stem cache migration happens on demand when an older `WAV`-based cache is encountered
+- Intel compatibility still depends on having an `x86_64`-compatible external Demucs runtime on the target Mac
 - no automated test suite is included yet
 
 ## License
