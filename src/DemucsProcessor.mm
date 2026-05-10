@@ -1,5 +1,9 @@
 #include "DemucsProcessor.h"
 
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
 namespace
 {
 constexpr std::array<DemucsProcessor::Stem, 4> stemOrder {
@@ -11,6 +15,10 @@ constexpr std::array<DemucsProcessor::Stem, 4> stemOrder {
 
 constexpr double markerToleranceSeconds = 0.05;
 constexpr double markerNavigationToleranceSeconds = 1.0;
+constexpr double minimumDetectedBpm = 60.0;
+constexpr double maximumDetectedBpm = 200.0;
+constexpr double bpmAnalysisDurationSeconds = 120.0;
+constexpr int bpmAnalysisHopSize = 1024;
 
 juce::String shellQuote(const juce::String& argument)
 {
@@ -173,6 +181,7 @@ void DemucsProcessor::reset()
     currentPlaybackPositionSeconds = 0.0;
     currentSampleRate = 0.0;
     currentNumChannels = 0;
+    detectedBpm = 0.0;
     bufferProgress = 0.0;
     updateBufferStatus();
 }
@@ -181,6 +190,10 @@ bool DemucsProcessor::setSourceAudioFile(const juce::File& audioFile)
 {
     if (audioFile == juce::File())
         return false;
+
+    const auto sourceDirectory = audioFile.getParentDirectory();
+    const auto sourceBpm = ensureDetectedBpmMetadata(sourceDirectory, audioFile);
+
     juce::String cacheError;
     auto cacheRoot = getCacheRootDirectory();
     if (! cacheRoot.exists())
@@ -193,10 +206,11 @@ bool DemucsProcessor::setSourceAudioFile(const juce::File& audioFile)
     {
         const juce::ScopedLock lock(stateLock);
         sourceAudioFile = audioFile;
-        selectedCacheDirectory = audioFile.getParentDirectory();
+        selectedCacheDirectory = sourceDirectory;
         selectedCacheEntryName = selectedCacheDirectory.getFileName();
         sourceAudioLoaded = true;
         currentPlaybackPositionSeconds = 0.0;
+        detectedBpm = sourceBpm;
         ++currentGeneration;
         markers = loadMarkersFromMetadata(selectedCacheDirectory);
         clearSeparatedAudio();
@@ -347,7 +361,13 @@ bool DemucsProcessor::renderBufferedAudio(juce::AudioBuffer<float>& output, doub
     for (int sample = 0; sample < outputSamples; ++sample)
     {
         const auto timeSeconds = startSeconds + (static_cast<double>(sample) / outputSampleRate);
-        const auto stemSamplePosition = timeSeconds * separatedSnapshot->sampleRate;
+        auto stemSamplePosition = timeSeconds * separatedSnapshot->sampleRate;
+        if (separatedSnapshot->numSamples > 0)
+        {
+            stemSamplePosition = std::fmod(stemSamplePosition, static_cast<double>(separatedSnapshot->numSamples));
+            if (stemSamplePosition < 0.0)
+                stemSamplePosition += static_cast<double>(separatedSnapshot->numSamples);
+        }
 
         for (int channel = 0; channel < outputChannels; ++channel)
         {
@@ -604,6 +624,12 @@ juce::String DemucsProcessor::getLastProcessLog() const
 {
     const juce::ScopedLock lock(stateLock);
     return lastProcessLog;
+}
+
+double DemucsProcessor::getDetectedBpm() const
+{
+    const juce::ScopedLock lock(stateLock);
+    return detectedBpm;
 }
 
 void DemucsProcessor::run()
@@ -883,6 +909,143 @@ juce::Array<double> DemucsProcessor::loadMarkersFromMetadata(const juce::File& s
     return loadedMarkers;
 }
 
+double DemucsProcessor::readDetectedBpmFromMetadata(const juce::File& sourceDirectory) const
+{
+    const auto metadataFile = getSourceMetadataFile(sourceDirectory);
+    if (! metadataFile.existsAsFile())
+        return 0.0;
+
+    auto xml = juce::XmlDocument::parse(metadataFile);
+    if (xml == nullptr || ! xml->hasTagName("JamPTCachedSource"))
+        return 0.0;
+
+    const auto bpm = xml->getDoubleAttribute("detectedBpm", 0.0);
+    return bpm > 0.0 && std::isfinite(bpm) ? bpm : 0.0;
+}
+
+bool DemucsProcessor::writeDetectedBpmToMetadata(const juce::File& sourceDirectory, double bpm) const
+{
+    if (bpm <= 0.0 || ! std::isfinite(bpm))
+        return false;
+
+    const auto metadataFile = getSourceMetadataFile(sourceDirectory);
+    std::unique_ptr<juce::XmlElement> xml;
+
+    if (metadataFile.existsAsFile())
+        xml = juce::XmlDocument::parse(metadataFile);
+
+    if (xml == nullptr || ! xml->hasTagName("JamPTCachedSource"))
+        xml = std::make_unique<juce::XmlElement>("JamPTCachedSource");
+
+    xml->setAttribute("detectedBpm", juce::String(bpm, 2));
+    return xml->writeTo(metadataFile);
+}
+
+double DemucsProcessor::ensureDetectedBpmMetadata(const juce::File& sourceDirectory, const juce::File& audioFile) const
+{
+    auto bpm = readDetectedBpmFromMetadata(sourceDirectory);
+    if (bpm > 0.0)
+        return bpm;
+
+    bpm = estimateSourceBpm(audioFile);
+    if (bpm > 0.0)
+        writeDetectedBpmToMetadata(sourceDirectory, bpm);
+
+    return bpm;
+}
+
+double DemucsProcessor::estimateSourceBpm(const juce::File& audioFile) const
+{
+    juce::AudioFormatManager localFormatManager;
+    localFormatManager.registerBasicFormats();
+
+    std::unique_ptr<juce::AudioFormatReader> reader(localFormatManager.createReaderFor(audioFile));
+    if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
+        return 0.0;
+
+    const auto samplesToAnalyse = static_cast<juce::int64>(
+        juce::jmin(static_cast<double>(reader->lengthInSamples),
+                   reader->sampleRate * bpmAnalysisDurationSeconds));
+
+    if (samplesToAnalyse <= bpmAnalysisHopSize * 8)
+        return 0.0;
+
+    const auto numChannels = juce::jmax(1, static_cast<int>(reader->numChannels));
+    juce::AudioBuffer<float> buffer(numChannels, bpmAnalysisHopSize);
+    std::vector<float> envelope;
+    envelope.reserve(static_cast<size_t>(samplesToAnalyse / bpmAnalysisHopSize));
+
+    for (juce::int64 position = 0; position < samplesToAnalyse; position += bpmAnalysisHopSize)
+    {
+        const auto samplesThisBlock = static_cast<int>(
+            juce::jmin(static_cast<juce::int64>(bpmAnalysisHopSize), samplesToAnalyse - position));
+
+        buffer.clear();
+        if (! reader->read(&buffer, 0, samplesThisBlock, position, true, true))
+            break;
+
+        double sumSquares = 0.0;
+        for (int channel = 0; channel < numChannels; ++channel)
+        {
+            const auto* channelData = buffer.getReadPointer(channel);
+            for (int sample = 0; sample < samplesThisBlock; ++sample)
+            {
+                const auto value = static_cast<double>(channelData[sample]);
+                sumSquares += value * value;
+            }
+        }
+
+        const auto denominator = static_cast<double>(juce::jmax(1, samplesThisBlock * numChannels));
+        envelope.push_back(static_cast<float>(std::sqrt(sumSquares / denominator)));
+    }
+
+    if (envelope.size() < 16)
+        return 0.0;
+
+    std::vector<float> onset(envelope.size(), 0.0f);
+    auto maxOnset = 0.0f;
+    for (size_t index = 1; index < envelope.size(); ++index)
+    {
+        onset[index] = juce::jmax(0.0f, envelope[index] - envelope[index - 1]);
+        maxOnset = juce::jmax(maxOnset, onset[index]);
+    }
+
+    if (maxOnset <= 0.0001f)
+        return 0.0;
+
+    const auto envelopeRate = reader->sampleRate / static_cast<double>(bpmAnalysisHopSize);
+    const auto minLag = juce::jmax(1, static_cast<int>(std::floor(envelopeRate * 60.0 / maximumDetectedBpm)));
+    const auto maxLag = juce::jmin(static_cast<int>(onset.size()) - 1,
+                                   static_cast<int>(std::ceil(envelopeRate * 60.0 / minimumDetectedBpm)));
+
+    auto bestLag = 0;
+    auto bestScore = 0.0;
+    for (int lag = minLag; lag <= maxLag; ++lag)
+    {
+        double score = 0.0;
+        for (size_t index = static_cast<size_t>(lag); index < onset.size(); ++index)
+            score += static_cast<double>(onset[index]) * static_cast<double>(onset[index - static_cast<size_t>(lag)]);
+
+        score /= static_cast<double>(onset.size() - static_cast<size_t>(lag));
+        if (score > bestScore)
+        {
+            bestScore = score;
+            bestLag = lag;
+        }
+    }
+
+    if (bestLag <= 0 || bestScore <= 0.0)
+        return 0.0;
+
+    auto bpm = 60.0 * envelopeRate / static_cast<double>(bestLag);
+    while (bpm < minimumDetectedBpm)
+        bpm *= 2.0;
+    while (bpm > maximumDetectedBpm)
+        bpm *= 0.5;
+
+    return std::isfinite(bpm) ? bpm : 0.0;
+}
+
 bool DemucsProcessor::saveMarkersToMetadata(const juce::File& sourceDirectory, const juce::Array<double>& markersToSave) const
 {
     const auto metadataFile = getSourceMetadataFile(sourceDirectory);
@@ -946,12 +1109,24 @@ bool DemucsProcessor::writeSourceMetadata(const juce::File& sourceDirectory, con
     if (metadata == nullptr || ! metadata->hasTagName("JamPTCachedSource"))
         metadata = std::make_unique<juce::XmlElement>("JamPTCachedSource");
 
+    const auto metadataMatchesCurrentFile =
+        metadata->getStringAttribute("originalFileName") == originalAudioFile.getFileName()
+        && metadata->getStringAttribute("originalSize") == juce::String(originalAudioFile.getSize())
+        && metadata->getStringAttribute("originalModified") == juce::String(originalAudioFile.getLastModificationTime().toMilliseconds());
+    auto bpm = metadataMatchesCurrentFile ? metadata->getDoubleAttribute("detectedBpm", 0.0) : 0.0;
+
     metadata->setAttribute("originalFileName", originalAudioFile.getFileName());
     metadata->setAttribute("originalSize", juce::String(originalAudioFile.getSize()));
     metadata->setAttribute("originalModified",
                            juce::String(originalAudioFile.getLastModificationTime().toMilliseconds()));
     metadata->setAttribute("cachedSourceFileName", "source" + originalAudioFile.getFileExtension());
     metadata->setAttribute("spectrogramFileName", "spectrogram.thumb");
+    if (bpm <= 0.0)
+        bpm = ensureDetectedBpmMetadata(sourceDirectory, originalAudioFile);
+
+    if (bpm > 0.0)
+        metadata->setAttribute("detectedBpm", juce::String(bpm, 2));
+
     return metadata->writeTo(metadataFile);
 }
 

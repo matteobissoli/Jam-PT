@@ -1,9 +1,73 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <cmath>
+
 namespace
 {
 constexpr double markerSeekFallbackSeconds = 10.0;
+constexpr float maximumDetectedBpmParameterValue = 300.0f;
+
+class ReadOnlyBpmParameter final : public juce::RangedAudioParameter
+{
+public:
+    ReadOnlyBpmParameter()
+        : juce::RangedAudioParameter(juce::ParameterID(JamPTAudioProcessor::getDetectedBpmParameterId(), 1),
+                                     "Detected BPM",
+                                     juce::AudioProcessorParameterWithIDAttributes()
+                                        .withLabel("BPM")
+                                        .withMeta(true)
+                                        .withAutomatable(false)),
+          range(0.0f, maximumDetectedBpmParameterValue, 1.0f)
+    {
+    }
+
+    void setBpm(double newBpm)
+    {
+        const auto nextValue = static_cast<float>(juce::jlimit(0.0, static_cast<double>(maximumDetectedBpmParameterValue), newBpm));
+        if (std::abs(value.load() - nextValue) < 0.01f)
+            return;
+
+        value.store(nextValue);
+        sendValueChangedMessageToListeners(convertTo0to1(nextValue));
+    }
+
+    const juce::NormalisableRange<float>& getNormalisableRange() const override
+    {
+        return range;
+    }
+
+private:
+    float getValue() const override
+    {
+        return convertTo0to1(value.load());
+    }
+
+    void setValue(float) override
+    {
+        // Read-only display parameter: hosts may request changes, but ownership stays internal.
+    }
+
+    float getDefaultValue() const override
+    {
+        return 0.0f;
+    }
+
+    juce::String getText(float normalisedValue, int maximumStringLength) const override
+    {
+        const auto bpm = convertFrom0to1(normalisedValue);
+        const auto text = bpm > 0.0f ? juce::String(static_cast<int>(std::round(bpm))) + " BPM" : juce::String("--");
+        return maximumStringLength > 0 ? text.substring(0, maximumStringLength) : text;
+    }
+
+    float getValueForText(const juce::String&) const override
+    {
+        return getValue();
+    }
+
+    juce::NormalisableRange<float> range;
+    std::atomic<float> value { 0.0f };
+};
 }
 
 JamPTAudioProcessor::JamPTAudioProcessor()
@@ -18,6 +82,7 @@ JamPTAudioProcessor::JamPTAudioProcessor()
     valueTreeState.addParameterListener(getMarkerActionParameterId("next"), this);
     syncStemGainsFromParameters();
     syncStemTogglesFromParameters();
+    syncDetectedBpmParameter();
     juce::String errorMessage;
     demucsProcessor.loadModel(DemucsProcessor::getDefaultModelName(), errorMessage);
 }
@@ -212,6 +277,7 @@ bool JamPTAudioProcessor::loadAudioFile(const juce::File& file)
     if (! demucsProcessor.setSourceAudioFile(backendAudioFile))
         return false;
 
+    syncDetectedBpmParameter();
     return true;
 }
 
@@ -227,7 +293,11 @@ bool JamPTAudioProcessor::loadCachedSourceEntry(const juce::String& entryName)
     if (! loadedAudio)
         return false;
 
-    return demucsProcessor.setSourceAudioFile(player.getLoadedFile());
+    const auto loadedBackend = demucsProcessor.setSourceAudioFile(player.getLoadedFile());
+    if (loadedBackend)
+        syncDetectedBpmParameter();
+
+    return loadedBackend;
 }
 
 bool JamPTAudioProcessor::startPlayback()
@@ -484,6 +554,11 @@ double JamPTAudioProcessor::getPlaybackProgress() const
     return player.getProgress();
 }
 
+double JamPTAudioProcessor::getDetectedBpm() const
+{
+    return demucsProcessor.getDetectedBpm();
+}
+
 juce::String JamPTAudioProcessor::getLoadedModelName() const
 {
     return demucsProcessor.getLoadedModelName();
@@ -528,6 +603,7 @@ void JamPTAudioProcessor::refreshBackendStateFromLoadedFile()
         return;
 
     demucsProcessor.setSourceAudioFile(playerFile);
+    syncDetectedBpmParameter();
 }
 
 JamPTAudioProcessor::APVTS::ParameterLayout JamPTAudioProcessor::createParameterLayout()
@@ -589,6 +665,7 @@ JamPTAudioProcessor::APVTS::ParameterLayout JamPTAudioProcessor::createParameter
     addStemToggleParameters(DemucsProcessor::Stem::drums, "Drums");
     addStemToggleParameters(DemucsProcessor::Stem::bass, "Bass");
     addStemToggleParameters(DemucsProcessor::Stem::other, "Other");
+    layout.add(std::make_unique<ReadOnlyBpmParameter>());
 
     return layout;
 }
@@ -633,6 +710,11 @@ juce::String JamPTAudioProcessor::getMarkerActionParameterId(const juce::String&
     return "marker_" + actionName;
 }
 
+juce::String JamPTAudioProcessor::getDetectedBpmParameterId()
+{
+    return "detected_bpm";
+}
+
 void JamPTAudioProcessor::syncStemGainsFromParameters()
 {
     applyStemGainFromParameter(DemucsProcessor::Stem::vocals);
@@ -663,6 +745,12 @@ void JamPTAudioProcessor::syncStemTogglesFromParameters()
         applyStemToggle(stem, "solo");
         applyStemToggle(stem, "mute");
     }
+}
+
+void JamPTAudioProcessor::syncDetectedBpmParameter()
+{
+    if (auto* parameter = dynamic_cast<ReadOnlyBpmParameter*>(valueTreeState.getParameter(getDetectedBpmParameterId())))
+        parameter->setBpm(demucsProcessor.getDetectedBpm());
 }
 
 void JamPTAudioProcessor::parameterChanged(const juce::String& parameterID, float newValue)

@@ -341,6 +341,7 @@ JamPTAudioProcessorEditor::JamPTAudioProcessorEditor(JamPTAudioProcessor& p)
     addAndMakeVisible(openModelButton);
 
     positionLabel.setJustificationType(juce::Justification::centredLeft);
+    bpmLabel.setJustificationType(juce::Justification::centred);
     durationLabel.setJustificationType(juce::Justification::centredRight);
     footerLabel.setJustificationType(juce::Justification::centred);
     buildLabel.setJustificationType(juce::Justification::centredRight);
@@ -406,6 +407,7 @@ JamPTAudioProcessorEditor::JamPTAudioProcessorEditor(JamPTAudioProcessor& p)
                                                              otherMuteButton);
 
     addAndMakeVisible(positionLabel);
+    addAndMakeVisible(bpmLabel);
     addAndMakeVisible(durationLabel);
     addAndMakeVisible(vocalsLabel);
     addAndMakeVisible(drumsLabel);
@@ -528,6 +530,7 @@ void JamPTAudioProcessorEditor::resized()
     auto row3 = area.removeFromTop(22);
     positionLabel.setBounds(row3.removeFromLeft(140));
     durationLabel.setBounds(row3.removeFromRight(140));
+    bpmLabel.setBounds(row3);
 
     area.removeFromTop(14);
     dividerY = area.getY() + 6;
@@ -722,6 +725,10 @@ void JamPTAudioProcessorEditor::refreshLabels()
     positionLabel.setText(stemsReady ? formatTime(audioProcessor.getPlaybackPositionSeconds())
                                      : summaryStatus,
                           juce::dontSendNotification);
+    const auto detectedBpm = audioProcessor.getDetectedBpm();
+    bpmLabel.setText(detectedBpm > 0.0 ? "BPM " + juce::String(static_cast<int>(std::round(detectedBpm)))
+                                       : "BPM --",
+                     juce::dontSendNotification);
     durationLabel.setText(hasAudioFile ? formatTime(audioProcessor.getPlaybackDurationSeconds()) : "--:--",
                           juce::dontSendNotification);
     waveformScrubber.setEnabled(hasAudioFile && stemsReady);

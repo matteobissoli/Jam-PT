@@ -62,6 +62,7 @@ public:
     juce::StringArray getCachedSourceEntryNames() const;
     bool prepareSourceAudioFile(const juce::File& audioFile, juce::File& cachedSourceFile, juce::String& errorMessage) const;
     bool resolveCachedSourceEntry(const juce::String& entryName, juce::File& cachedSourceFile, juce::String& errorMessage) const;
+    double getDetectedBpm() const;
     juce::String getCacheRootPath() const;
     juce::String getLastProcessLog() const;
 
@@ -87,6 +88,10 @@ private:
     juce::File getSpectrogramCacheFile(const juce::File& sourceDirectory) const;
     juce::File getStemCacheDirectory(const juce::String& modelName, const juce::File& sourceDirectory) const;
     juce::Array<double> loadMarkersFromMetadata(const juce::File& sourceDirectory) const;
+    double readDetectedBpmFromMetadata(const juce::File& sourceDirectory) const;
+    bool writeDetectedBpmToMetadata(const juce::File& sourceDirectory, double bpm) const;
+    double ensureDetectedBpmMetadata(const juce::File& sourceDirectory, const juce::File& audioFile) const;
+    double estimateSourceBpm(const juce::File& audioFile) const;
     bool saveMarkersToMetadata(const juce::File& sourceDirectory, const juce::Array<double>& markers) const;
     juce::String getUniqueSourceDirectoryName(const juce::String& preferredName) const;
     juce::File findExistingSourceDirectory(const juce::File& audioFile) const;
@@ -139,6 +144,7 @@ private:
     juce::String bufferStatusText { "Select a Demucs model" };
     juce::String lastInferenceError;
     juce::String lastProcessLog;
+    double detectedBpm = 0.0;
     juce::Array<double> markers;
     std::shared_ptr<const SeparatedAudioData> separatedAudioData;
     std::array<float, static_cast<size_t>(Stem::count)> stemGains { 1.0f, 1.0f, 1.0f, 1.0f };

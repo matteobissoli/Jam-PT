@@ -22,6 +22,7 @@ bool AudioFilePlayer::loadFile(const juce::File& file)
     detachCurrentSource();
 
     readerSource.reset(new juce::AudioFormatReaderSource(reader, true));
+    readerSource->setLooping(true);
     transport.setSource(readerSource.get(), 0, nullptr, reader->sampleRate);
     transport.setPosition(0.0);
     transport.stop();
@@ -64,7 +65,8 @@ void AudioFilePlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& buff
     if (playbackState == PlaybackState::playing && hasReachedEnd && ! transport.isPlaying())
     {
         transport.setPosition(0.0);
-        playbackState = PlaybackState::stopped;
+        transport.start();
+        playbackState = PlaybackState::playing;
     }
 }
 

@@ -102,6 +102,7 @@ private:
     juce::TextButton nextButton { "Next" };
     juce::TextButton openModelButton { "Select Demucs model" };
     juce::Label positionLabel;
+    juce::Label bpmLabel;
     juce::Label durationLabel;
     juce::Label vocalsLabel;
     juce::Label drumsLabel;

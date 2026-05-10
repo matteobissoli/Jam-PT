@@ -77,6 +77,7 @@ public:
     double getPlaybackPositionSeconds() const;
     double getPlaybackDurationSeconds() const;
     double getPlaybackProgress() const;
+    double getDetectedBpm() const;
     juce::StringArray getAvailableModelNames() const;
     juce::String getLoadedModelName() const;
     bool isModelLoaded() const;
@@ -88,6 +89,7 @@ public:
     static juce::String getStemToggleParameterId(DemucsProcessor::Stem stem, const juce::String& toggleKind);
     static juce::String getControlActionParameterId(const juce::String& actionName);
     static juce::String getMarkerActionParameterId(const juce::String& actionName);
+    static juce::String getDetectedBpmParameterId();
     void refreshBackendStateFromLoadedFile();
 
 private:
@@ -109,6 +111,7 @@ private:
     void resetMomentaryParameter(const juce::String& parameterID);
     void syncStemGainsFromParameters();
     void syncStemTogglesFromParameters();
+    void syncDetectedBpmParameter();
     void applyStemGainFromParameter(DemucsProcessor::Stem stem);
     struct PendingPlaybackRestore
     {
